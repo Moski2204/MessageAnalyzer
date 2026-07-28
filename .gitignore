@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+instance/
+reports/*.html
+*.log
+.message-analyzer-test-*/

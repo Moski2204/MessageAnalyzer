@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Home · Instagram Message Analyzer{% endblock %}
+{% block content %}
+  <section class="page-heading">
+    <p class="eyebrow">Local conversation workspace</p>
+    <h1>Instagram Message Analyzer</h1>
+    <p>Import, search, browse, and measure one conversation. Everything stays on this computer.</p>
+  </section>
+
+  {% if summary %}
+    <section class="stats-grid" aria-label="Import status">
+      <article class="stat"><span>Status</span><strong>Imported</strong></article>
+      <article class="stat"><span>HTML files</span><strong>{{ summary.files_processed }} / {{ summary.files_found }}</strong></article>
+      <article class="stat"><span>Messages</span><strong>{{ "{:,}".format(summary.messages_imported) }}</strong></article>
+      <article class="stat"><span>Duplicates skipped</span><strong>{{ "{:,}".format(summary.duplicates_skipped) }}</strong></article>
+      <article class="stat"><span>Other senders excluded</span><strong>{{ "{:,}".format(summary.messages_skipped_other_senders or 0) }}</strong></article>
+      <article class="stat"><span>Oldest</span><strong>{{ summary.oldest_timestamp or "Unknown" }}</strong></article>
+      <article class="stat"><span>Newest</span><strong>{{ summary.newest_timestamp or "Unknown" }}</strong></article>
+    </section>
+    {% if summary.files_failed %}
+      <div class="notice warning">{{ summary.files_failed }} file(s) failed during import.</div>
+    {% endif %}
+  {% else %}
+    <div class="notice warning">
+      <strong>The conversation has not been imported yet.</strong>
+      The app will automatically scan <code>data/message_*.html</code>.
+    </div>
+  {% endif %}
+
+  <section class="actions">
+    <form method="post" action="{{ url_for('import_route') }}">
+      <button class="button primary" type="submit">Import Messages</button>
+    </form>
+    <form method="post" action="{{ url_for('rebuild_route') }}" onsubmit="return confirm('Rebuild the generated database from the original HTML files?');">
+      <button class="button secondary" type="submit">Rebuild Database</button>
+    </form>
+    <a class="button secondary" href="{{ url_for('search') }}">Search Conversation</a>
+    <a class="button secondary" href="{{ url_for('conversation') }}">View Full Conversation</a>
+    <a class="button secondary" href="{{ url_for('analysis_page') }}">View Analysis</a>
+  </section>
+
+  <p class="privacy-note">The original files in <code>data/</code> are read-only to this app. Rebuild removes only the generated SQLite database.</p>
+{% endblock %}

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Full Conversation{% endblock %}
+{% block content %}
+  <section class="page-heading compact">
+    <p class="eyebrow">Browse</p>
+    <h1>Full Conversation</h1>
+    <p>{{ "{:,}".format(total) }} messages · Page {{ values.page }} of {{ total_pages }}</p>
+  </section>
+
+  <form class="panel inline-form" method="get">
+    <label>
+      Sort
+      <select name="direction">
+        <option value="asc" {% if values.direction == "asc" %}selected{% endif %}>Oldest first</option>
+        <option value="desc" {% if values.direction == "desc" %}selected{% endif %}>Newest first</option>
+      </select>
+    </label>
+    <label>
+      Sender
+      <select name="sender">
+        <option value="">All senders</option>
+        {% for sender in senders %}
+          <option value="{{ sender }}" {% if values.sender == sender %}selected{% endif %}>{{ sender }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Messages per page
+      <select name="per_page">
+        {% for size in [50, 100, 250] %}
+          <option value="{{ size }}" {% if values.per_page == size %}selected{% endif %}>{{ size }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="button primary" type="submit">Apply</button>
+  </form>
+
+  <div class="conversation">
+    {% for message in messages %}
+      <article id="message-{{ message.id }}" class="message-card {% if message.id == values.target %}selected{% endif %}">
+        <header>
+          <strong>{{ message.sender }}</strong>
+          <span>{{ message.original_timestamp or message.timestamp or "Unknown time" }}</span>
+          <span>{{ message.message_type }}</span>
+        </header>
+        <div class="message-text">{{ message.message_text }}</div>
+        {% if message.attachment_path %}
+          <a class="text-link" href="{{ url_for('media', filename=message.attachment_path) }}" target="_blank" rel="noopener">Open local attachment</a>
+        {% endif %}
+      </article>
+    {% endfor %}
+  </div>
+
+  <nav class="pager" aria-label="Conversation pages">
+    {% if previous_url %}<a class="button secondary" href="{{ previous_url }}">Previous Page</a>{% endif %}
+    <span>Page {{ values.page }} of {{ total_pages }}</span>
+    {% if next_url %}<a class="button secondary" href="{{ next_url }}">Next Page</a>{% endif %}
+  </nav>
+{% endblock %}

@@ -1,0 +1,419 @@
+"""Private localhost Flask interface for one Instagram conversation."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import logging
+import math
+import os
+import re
+import secrets
+from pathlib import Path
+from typing import Any
+
+from flask import (
+    Flask,
+    abort,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    send_from_directory,
+    url_for,
+)
+from markupsafe import Markup, escape
+
+from analysis import DEFAULT_STOP_WORDS, WORD_RE, analyze_messages, parse_stop_words
+from database import (
+    clean_search_filters,
+    connect,
+    conversation_page,
+    database_ready,
+    date_to_unix,
+    get_import_summary,
+    get_senders,
+    import_messages,
+    page_for_message,
+    search_messages,
+)
+from reports import generate_analysis_report, generate_search_report
+
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+DATABASE_PATH = BASE_DIR / "instance" / "messages.db"
+REPORTS_DIR = BASE_DIR / "reports"
+
+app = Flask(__name__)
+app.config.update(
+    SECRET_KEY=secrets.token_hex(32),
+    MAX_CONTENT_LENGTH=1_000_000,
+)
+
+# Access logs include query strings. Disable them so private search terms are
+# never echoed to the terminal.
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+
+def _watched_files() -> list[Path]:
+    files = [
+        *BASE_DIR.glob("*.py"),
+        *(BASE_DIR / "templates").glob("*.html"),
+        *(BASE_DIR / "static").glob("*"),
+    ]
+    return sorted(path for path in files if path.is_file())
+
+
+def _development_version() -> str:
+    fingerprint = hashlib.sha256()
+    for path in _watched_files():
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        fingerprint.update(path.relative_to(BASE_DIR).as_posix().encode("utf-8"))
+        fingerprint.update(f":{stat.st_mtime_ns}:{stat.st_size}".encode("ascii"))
+    return fingerprint.hexdigest()
+
+
+def _ready_or_redirect():
+    if not database_ready(DATABASE_PATH):
+        flash("The conversation has not been imported yet.", "warning")
+        return redirect(url_for("index"))
+    return None
+
+
+def _search_urls(filters: dict[str, Any], total_pages: int) -> dict[str, str | None]:
+    base = dict(filters)
+    current = filters["page"]
+    urls: dict[str, str | None] = {
+        "previous": url_for("search_report", **{**base, "page": current - 1})
+        if current > 1
+        else None,
+        "next": url_for("search_report", **{**base, "page": current + 1})
+        if current < total_pages
+        else None,
+        "oldest": url_for(
+            "search_report", **{**base, "direction": "asc", "page": 1}
+        ),
+        "newest": url_for(
+            "search_report", **{**base, "direction": "desc", "page": 1}
+        ),
+        "download": url_for("download_search_report", **base),
+    }
+    return urls
+
+
+def _highlight(text: str, query: str, mode: str) -> Markup:
+    if not query:
+        return Markup(escape(text))
+    terms = [query] if mode in {"contains", "phrase"} else WORD_RE.findall(query)
+    terms = sorted({term for term in terms if term}, key=len, reverse=True)
+    if not terms:
+        return Markup(escape(text))
+    pattern = re.compile("|".join(re.escape(term) for term in terms), re.IGNORECASE)
+    pieces: list[Markup] = []
+    position = 0
+    for match in pattern.finditer(text):
+        pieces.append(escape(text[position : match.start()]))
+        pieces.append(Markup("<mark>") + escape(match.group(0)) + Markup("</mark>"))
+        position = match.end()
+    pieces.append(escape(text[position:]))
+    return Markup("").join(pieces)
+
+
+app.jinja_env.filters["highlight"] = _highlight
+
+
+@app.route("/")
+def index():
+    return render_template("index.html", summary=get_import_summary(DATABASE_PATH))
+
+
+@app.get("/__dev/version")
+def development_version():
+    response = jsonify(version=_development_version())
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
+
+
+@app.post("/import")
+def import_route():
+    try:
+        stats = import_messages(DATA_DIR, DATABASE_PATH, rebuild=False)
+        if stats["files_failed"]:
+            flash("The import completed with some errors.", "warning")
+        else:
+            flash("Import complete. The original Instagram files were not modified.", "success")
+    except Exception:
+        app.logger.exception("Import failed without logging message contents.")
+        flash("The import could not be completed. The original files were not modified.", "error")
+    return redirect(url_for("index"))
+
+
+@app.post("/rebuild")
+def rebuild_route():
+    try:
+        stats = import_messages(DATA_DIR, DATABASE_PATH, rebuild=True)
+        if stats["files_failed"]:
+            flash("The database was rebuilt with some file errors.", "warning")
+        else:
+            flash("Database rebuilt. The original Instagram files were not modified.", "success")
+    except Exception:
+        app.logger.exception("Database rebuild failed without logging message contents.")
+        flash("The database could not be rebuilt.", "error")
+    return redirect(url_for("index"))
+
+
+@app.route("/search")
+def search():
+    senders: list[str] = []
+    if database_ready(DATABASE_PATH):
+        with connect(DATABASE_PATH) as connection:
+            senders = get_senders(connection)
+    return render_template(
+        "search.html",
+        filters=clean_search_filters(request.args),
+        senders=senders,
+    )
+
+
+@app.route("/search/report")
+def search_report():
+    blocked = _ready_or_redirect()
+    if blocked:
+        return blocked
+    filters = clean_search_filters(request.args)
+    with connect(DATABASE_PATH) as connection:
+        senders = get_senders(connection)
+        total, rows = search_messages(connection, filters)
+    total_pages = max(1, math.ceil(total / filters["per_page"]))
+    if filters["page"] > total_pages:
+        filters["page"] = total_pages
+        return redirect(url_for("search_report", **filters))
+    return render_template(
+        "search_report.html",
+        filters=filters,
+        senders=senders,
+        results=rows,
+        total=total,
+        total_pages=total_pages,
+        urls=_search_urls(filters, total_pages),
+    )
+
+
+@app.route("/search/report/download")
+def download_search_report():
+    blocked = _ready_or_redirect()
+    if blocked:
+        return blocked
+    filters = clean_search_filters(request.args)
+    with connect(DATABASE_PATH) as connection:
+        total, _ = search_messages(connection, {**filters, "page": 1})
+        output_path = generate_search_report(connection, REPORTS_DIR, filters, total)
+    return send_file(
+        output_path,
+        as_attachment=True,
+        download_name=output_path.name,
+        mimetype="text/html",
+    )
+
+
+def _conversation_values() -> dict[str, Any]:
+    direction = "desc" if request.args.get("direction") == "desc" else "asc"
+    sender = request.args.get("sender", "").strip()[:200]
+    try:
+        per_page = int(request.args.get("per_page", 100))
+    except ValueError:
+        per_page = 100
+    if per_page not in {50, 100, 250}:
+        per_page = 100
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except ValueError:
+        page = 1
+    try:
+        target = int(request.args.get("target", 0))
+    except ValueError:
+        target = 0
+    return {
+        "direction": direction,
+        "sender": sender,
+        "per_page": per_page,
+        "page": page,
+        "target": target,
+    }
+
+
+@app.route("/conversation")
+def conversation():
+    blocked = _ready_or_redirect()
+    if blocked:
+        return blocked
+    values = _conversation_values()
+    with connect(DATABASE_PATH) as connection:
+        senders = get_senders(connection)
+        if values["target"] and "page" not in request.args:
+            values["page"] = page_for_message(
+                connection,
+                values["target"],
+                values["direction"],
+                values["sender"],
+                values["per_page"],
+            )
+        total, rows = conversation_page(
+            connection,
+            values["direction"],
+            values["sender"],
+            values["per_page"],
+            values["page"],
+        )
+    total_pages = max(1, math.ceil(total / values["per_page"]))
+    if values["page"] > total_pages:
+        values["page"] = total_pages
+        return redirect(url_for("conversation", **values))
+    previous_url = (
+        url_for("conversation", **{**values, "page": values["page"] - 1})
+        if values["page"] > 1
+        else None
+    )
+    next_url = (
+        url_for("conversation", **{**values, "page": values["page"] + 1})
+        if values["page"] < total_pages
+        else None
+    )
+    return render_template(
+        "conversation.html",
+        values=values,
+        senders=senders,
+        messages=rows,
+        total=total,
+        total_pages=total_pages,
+        previous_url=previous_url,
+        next_url=next_url,
+    )
+
+
+def _analysis_inputs() -> tuple[str, str, int, str]:
+    start_date = request.values.get("start_date", "").strip()
+    end_date = request.values.get("end_date", "").strip()
+    try:
+        top_n = int(request.values.get("top_n", 20))
+    except ValueError:
+        top_n = 20
+    if top_n not in {20, 50, 100}:
+        top_n = 20
+    stop_words = request.values.get("stop_words")
+    if stop_words is None:
+        stop_words = DEFAULT_STOP_WORDS
+    return start_date, end_date, top_n, stop_words[:10000]
+
+
+@app.route("/analysis", methods=["GET", "POST"])
+def analysis_page():
+    blocked = _ready_or_redirect()
+    if blocked:
+        return blocked
+    start_date, end_date, top_n, stop_words = _analysis_inputs()
+    with connect(DATABASE_PATH) as connection:
+        result = analyze_messages(
+            connection,
+            date_to_unix(start_date),
+            date_to_unix(end_date, end=True),
+            parse_stop_words(stop_words),
+            top_n,
+        )
+    if not result["total_messages"]:
+        flash("No messages were available for this analysis.", "warning")
+    return render_template(
+        "analysis.html",
+        result=result,
+        start_date=start_date,
+        end_date=end_date,
+        top_n=top_n,
+        stop_words=stop_words,
+    )
+
+
+@app.post("/analysis/download")
+def download_analysis_report():
+    blocked = _ready_or_redirect()
+    if blocked:
+        return blocked
+    start_date, end_date, top_n, stop_words = _analysis_inputs()
+    with connect(DATABASE_PATH) as connection:
+        result = analyze_messages(
+            connection,
+            date_to_unix(start_date),
+            date_to_unix(end_date, end=True),
+            parse_stop_words(stop_words),
+            top_n,
+        )
+    output_path = generate_analysis_report(
+        REPORTS_DIR, result, start_date, end_date, top_n
+    )
+    return send_file(
+        output_path,
+        as_attachment=True,
+        download_name=output_path.name,
+        mimetype="text/html",
+    )
+
+
+@app.route("/media/<path:filename>")
+def media(filename: str):
+    try:
+        candidate = (DATA_DIR / filename).resolve()
+        relative = candidate.relative_to(DATA_DIR.resolve())
+    except (OSError, ValueError):
+        abort(404)
+    if not candidate.is_file():
+        abort(404)
+    return send_from_directory(DATA_DIR, relative.as_posix(), as_attachment=False)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Private Instagram message analyzer")
+    parser.add_argument(
+        "--import-data", action="store_true", help="Import data and exit"
+    )
+    parser.add_argument(
+        "--rebuild", action="store_true", help="Delete the generated database, import, and exit"
+    )
+    args = parser.parse_args()
+    if args.import_data or args.rebuild:
+        def progress(current: int, total: int, filename: str, succeeded: bool) -> None:
+            state = "processed" if succeeded else "failed"
+            print(f"[{current}/{total}] {filename}: {state}", flush=True)
+
+        stats = import_messages(
+            DATA_DIR,
+            DATABASE_PATH,
+            rebuild=args.rebuild,
+            progress_callback=progress,
+        )
+        print(
+            "Import complete: "
+            f"{stats['files_processed']}/{stats['files_found']} files, "
+            f"{stats['messages_imported']} messages, "
+            f"{stats['duplicates_skipped']} duplicates, "
+            f"{stats['messages_skipped_other_senders']} other-sender messages excluded, "
+            f"{stats['files_failed']} failures."
+        )
+        return
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    hot_reload = os.environ.get("MESSAGE_ANALYZER_HOT_RELOAD", "1") != "0"
+    app.run(
+        host="127.0.0.1",
+        port=5000,
+        debug=False,
+        use_reloader=hot_reload,
+        extra_files=[str(path) for path in _watched_files()] if hot_reload else None,
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Search Report{% endblock %}
+{% block content %}
+  <section class="page-heading compact">
+    <p class="eyebrow">Search Report</p>
+    <h1>{{ "{:,}".format(total) }} matching message{% if total != 1 %}s{% endif %}</h1>
+    <p>Page {{ filters.page }} of {{ total_pages }} · {{ "Oldest" if filters.direction == "asc" else "Newest" }} first</p>
+  </section>
+
+  <section class="filter-summary">
+    <span><strong>Query:</strong> {{ filters.q or "None" }}</span>
+    <span><strong>Mode:</strong> {{ filters.mode }}</span>
+    <span><strong>Sender:</strong> {{ filters.sender or "All" }}</span>
+    <span><strong>Dates:</strong> {{ filters.start_date or "Beginning" }} → {{ filters.end_date or "End" }}</span>
+  </section>
+
+  <div class="toolbar">
+    <a class="button secondary" href="{{ url_for('search', **filters) }}">Edit Search</a>
+    <a class="button secondary" href="{{ url_for('search') }}">Clear Search</a>
+    <a class="button secondary" href="{{ urls.oldest }}">Oldest First</a>
+    <a class="button secondary" href="{{ urls.newest }}">Newest First</a>
+    <a class="button primary" href="{{ urls.download }}">Download Report</a>
+  </div>
+
+  {% if not results %}
+    <div class="notice">No messages matched your search.</div>
+  {% endif %}
+
+  <div class="results">
+    {% for result in results %}
+      <section class="result-group">
+        {% set message = result %}
+        <article class="message-card match">
+          <header>
+            <strong>{{ message.sender }}</strong>
+            <span>{{ message.original_timestamp or message.timestamp or "Unknown time" }}</span>
+            <span>{{ message.message_type }}</span>
+            <span>{{ message.source_filename }}</span>
+            <span class="match-label">MATCH</span>
+          </header>
+          <div class="message-text">{{ message.message_text|highlight(filters.q, filters.mode) }}</div>
+          <a class="text-link" href="{{ url_for('conversation', target=message.id, direction='asc') }}#message-{{ message.id }}">View in Full Conversation</a>
+        </article>
+      </section>
+    {% endfor %}
+  </div>
+
+  <nav class="pager" aria-label="Search result pages">
+    {% if urls.previous %}<a class="button secondary" href="{{ urls.previous }}">Previous Page</a>{% endif %}
+    <span>Page {{ filters.page }} of {{ total_pages }}</span>
+    {% if urls.next %}<a class="button secondary" href="{{ urls.next }}">Next Page</a>{% endif %}
+  </nav>
+{% endblock %}
