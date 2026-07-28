@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import logging
 import math
-import os
 import re
 import secrets
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -478,13 +477,11 @@ def main() -> None:
         )
         return
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    hot_reload = os.environ.get("MESSAGE_ANALYZER_HOT_RELOAD", "1") != "0"
     app.run(
         host="127.0.0.1",
         port=5000,
         debug=False,
-        use_reloader=hot_reload,
-        extra_files=[str(path) for path in _watched_files()] if hot_reload else None,
+        use_reloader=False,
     )
 
 

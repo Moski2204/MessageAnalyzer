@@ -202,7 +202,7 @@ class MessageAnalyzerTests(unittest.TestCase):
                 ),
             ]
             self.assertTrue(all(response.status_code == 200 for response in checks))
-            self.assertIn(
+            self.assertNotIn(
                 "hot_reload.js",
                 checks[0].get_data(as_text=True),
             )
@@ -224,6 +224,23 @@ class MessageAnalyzerTests(unittest.TestCase):
             )
             self.assertEqual(analysis_download.status_code, 200)
             analysis_download.close()
+
+    def test_normal_start_disables_debug_and_reloader(self):
+        import app as app_module
+
+        with (
+            patch("sys.argv", ["app.py"]),
+            patch.object(app_module, "REPORTS_DIR", self.reports),
+            patch.object(app_module.app, "run") as run,
+        ):
+            app_module.main()
+
+        run.assert_called_once_with(
+            host="127.0.0.1",
+            port=5000,
+            debug=False,
+            use_reloader=False,
+        )
 
     def test_photo_index_rejects_ambiguous_and_unsafe_paths(self):
         photos = self.root / "duplicate-photos"

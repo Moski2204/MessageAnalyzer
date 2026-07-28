@@ -31,20 +31,12 @@ directly:
 ## Start
 
 ```powershell
-python app.py
+.\.venv\Scripts\python.exe app.py
 ```
 
 Open <http://127.0.0.1:5000>. The server binds only to `127.0.0.1`, and debug
-mode is off.
-
-Hot reload is enabled by default. Changes to Python files, templates, CSS, or
-local JavaScript restart Flask and automatically reload open app pages. To
-disable it for a run:
-
-```powershell
-$env:MESSAGE_ANALYZER_HOT_RELOAD="0"
-python app.py
-```
+mode and hot reload are off. Stop and restart the command manually after
+changing application source files.
 
 On Home, select **Import Messages**. The import automatically discovers and
 numerically sorts every `data/message_*.html` file. It may take several minutes
