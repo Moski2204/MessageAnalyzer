@@ -1,7 +1,10 @@
 __pycache__/
 *.py[cod]
 .venv/
-instance/
-reports/*.html
-*.log
+.pytest_cache/
 .message-analyzer-test-*/
+
+/data/
+/instance/
+/reports/
+*.log

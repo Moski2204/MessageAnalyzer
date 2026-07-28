@@ -106,6 +106,22 @@ input:focus, select:focus, textarea:focus { outline: 3px solid var(--soft-accent
 .message-card header { display: flex; flex-wrap: wrap; gap: .35rem .7rem; margin-bottom: .45rem; color: var(--muted); font-size: .8rem; }
 .message-card header strong { color: var(--ink); }
 .message-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.message-photo {
+  display: block;
+  width: min(100%, 420px);
+  max-height: 520px;
+  margin-top: .7rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  object-fit: contain;
+  background: var(--soft-accent);
+}
+.photo-unavailable {
+  display: block;
+  margin-top: .6rem;
+  color: var(--muted);
+  font-style: italic;
+}
 .match-label { color: var(--accent-dark); font-weight: 900; letter-spacing: .07em; }
 mark { padding: 0 .1em; background: #ffdf72; border-radius: 2px; }
 .text-link { display: inline-block; margin-top: .5rem; font-size: .85rem; font-weight: 700; }

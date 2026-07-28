@@ -9,7 +9,7 @@ import math
 import os
 import re
 import secrets
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from flask import (
@@ -44,6 +44,7 @@ from reports import generate_analysis_report, generate_search_report
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
+PHOTO_DIR = DATA_DIR / "photos"
 DATABASE_PATH = BASE_DIR / "instance" / "messages.db"
 REPORTS_DIR = BASE_DIR / "reports"
 
@@ -84,6 +85,70 @@ def _ready_or_redirect():
         flash("The conversation has not been imported yet.", "warning")
         return redirect(url_for("index"))
     return None
+
+
+def _image_mimetype(path: Path) -> str | None:
+    try:
+        with path.open("rb") as photo:
+            header = photo.read(16)
+    except OSError:
+        return None
+    if header.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if (
+        len(header) >= 12
+        and header.startswith(b"RIFF")
+        and header[8:12] == b"WEBP"
+    ):
+        return "image/webp"
+    return None
+
+
+def _safe_photo(
+    filename: str | None,
+) -> tuple[Path, str, str] | None:
+    if not filename or "\\" in filename or "\x00" in filename:
+        return None
+    posix_path = PurePosixPath(filename)
+    windows_path = PureWindowsPath(filename)
+    if (
+        posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or any(part in {"", ".", ".."} for part in filename.split("/"))
+    ):
+        return None
+
+    try:
+        photo_root = PHOTO_DIR.resolve()
+        candidate = (photo_root / Path(*posix_path.parts)).resolve()
+        relative = candidate.relative_to(photo_root).as_posix()
+    except (OSError, ValueError):
+        return None
+    if not candidate.is_file():
+        return None
+    mimetype = _image_mimetype(candidate)
+    return (candidate, relative, mimetype) if mimetype else None
+
+
+def _messages_with_photo_availability(rows) -> list[dict[str, Any]]:
+    """Check photos only for the messages selected by the current page query."""
+    messages: list[dict[str, Any]] = []
+    for row in rows:
+        message = dict(row)
+        photo = (
+            _safe_photo(message.get("attachment_path"))
+            if message.get("message_type") == "photo"
+            else None
+        )
+        message["attachment_path"] = photo[1] if photo else None
+        message["photo_available"] = photo is not None
+        messages.append(message)
+    return messages
 
 
 def _search_urls(filters: dict[str, Any], total_pages: int) -> dict[str, str | None]:
@@ -190,6 +255,7 @@ def search_report():
     with connect(DATABASE_PATH) as connection:
         senders = get_senders(connection)
         total, rows = search_messages(connection, filters)
+    rows = _messages_with_photo_availability(rows)
     total_pages = max(1, math.ceil(total / filters["per_page"]))
     if filters["page"] > total_pages:
         filters["page"] = total_pages
@@ -271,6 +337,7 @@ def conversation():
             values["per_page"],
             values["page"],
         )
+    rows = _messages_with_photo_availability(rows)
     total_pages = max(1, math.ceil(total / values["per_page"]))
     if values["page"] > total_pages:
         values["page"] = total_pages
@@ -363,16 +430,22 @@ def download_analysis_report():
     )
 
 
-@app.route("/media/<path:filename>")
-def media(filename: str):
-    try:
-        candidate = (DATA_DIR / filename).resolve()
-        relative = candidate.relative_to(DATA_DIR.resolve())
-    except (OSError, ValueError):
+@app.get("/photos/<path:filename>")
+def photo(filename: str):
+    safe_photo = _safe_photo(filename)
+    if safe_photo is None:
         abort(404)
-    if not candidate.is_file():
-        abort(404)
-    return send_from_directory(DATA_DIR, relative.as_posix(), as_attachment=False)
+    _, relative, mimetype = safe_photo
+    response = send_from_directory(
+        PHOTO_DIR,
+        relative,
+        as_attachment=False,
+        conditional=True,
+        mimetype=mimetype,
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.cache_control.private = True
+    return response
 
 
 def main() -> None:

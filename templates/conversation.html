@@ -44,8 +44,18 @@
           <span>{{ message.message_type }}</span>
         </header>
         <div class="message-text">{{ message.message_text }}</div>
-        {% if message.attachment_path %}
-          <a class="text-link" href="{{ url_for('media', filename=message.attachment_path) }}" target="_blank" rel="noopener">Open local attachment</a>
+        {% if message.message_type == "photo" %}
+          {% if message.photo_available %}
+            <img
+              class="message-photo"
+              src="{{ url_for('photo', filename=message.attachment_path) }}"
+              alt="Instagram chat photo"
+              loading="lazy"
+              decoding="async"
+            >
+          {% else %}
+            <span class="photo-unavailable">Photo unavailable.</span>
+          {% endif %}
         {% endif %}
       </article>
     {% endfor %}

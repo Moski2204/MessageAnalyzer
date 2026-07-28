@@ -50,6 +50,24 @@ On Home, select **Import Messages**. The import automatically discovers and
 numerically sorts every `data/message_*.html` file. It may take several minutes
 for a very large export. The original `data/` files are never changed.
 
+Keep the private export in this local layout:
+
+```text
+data/
+  message_1.html
+  message_2.html
+  ...
+  photos/
+    <Instagram photo files>
+```
+
+The entire `data/` directory is ignored by Git. Do not move the photos into
+`static/`: the app serves verified local images through its restricted
+`/photos/<filename>` route. During import, photo references are matched once
+against `data/photos`, and SQLite stores only paths relative to that directory.
+Missing or ambiguous matches are not guessed and appear as **Photo
+unavailable**.
+
 You can also import without opening the web page:
 
 ```powershell
@@ -65,7 +83,8 @@ python app.py --import-data
   Conversation** opens the page containing that database message and
   highlights it.
 - **Full Conversation** pages through 50, 100, or 250 messages without loading
-  the whole export into the browser.
+  the whole export into the browser. Photos are loaded only for messages on the
+  current page and use browser lazy loading.
 - **Analysis** accepts an optional date range and editable stop-word list. It
   shows response timing, frequent words, approximate local sentiment, and
   descriptive conversation patterns.

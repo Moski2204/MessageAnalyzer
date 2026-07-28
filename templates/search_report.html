@@ -39,6 +39,19 @@
             <span class="match-label">MATCH</span>
           </header>
           <div class="message-text">{{ message.message_text|highlight(filters.q, filters.mode) }}</div>
+          {% if message.message_type == "photo" %}
+            {% if message.photo_available %}
+              <img
+                class="message-photo"
+                src="{{ url_for('photo', filename=message.attachment_path) }}"
+                alt="Instagram chat photo"
+                loading="lazy"
+                decoding="async"
+              >
+            {% else %}
+              <span class="photo-unavailable">Photo unavailable.</span>
+            {% endif %}
+          {% endif %}
           <a class="text-link" href="{{ url_for('conversation', target=message.id, direction='asc') }}#message-{{ message.id }}">View in Full Conversation</a>
         </article>
       </section>

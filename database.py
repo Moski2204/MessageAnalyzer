@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from analysis import LocalSentiment
-from parser import ParsedMessage, discover_message_files, normalize_text, parse_message_file
+from parser import (
+    ParsedMessage,
+    PhotoIndex,
+    discover_message_files,
+    normalize_text,
+    parse_message_file,
+)
 
 
 WORD_RE = re.compile(r"[^\W_]+(?:['’][^\W_]+)*", re.UNICODE)
@@ -158,6 +164,7 @@ def import_messages(
                 generated_path.unlink()
 
     files = discover_message_files(data_dir)
+    photo_index = PhotoIndex.build(data_dir / "photos")
     sentiment = LocalSentiment()
     stats: dict[str, Any] = {
         "files_found": len(files),
@@ -169,6 +176,10 @@ def import_messages(
         "oldest_timestamp": None,
         "newest_timestamp": None,
         "sentiment_method": sentiment.method,
+        "photo_files_indexed": photo_index.file_count,
+        "ambiguous_photo_filenames": photo_index.ambiguous_filename_count,
+        "photo_references_matched": 0,
+        "photo_references_unavailable": 0,
     }
 
     with connect(database_path) as connection:
@@ -184,7 +195,7 @@ def import_messages(
             inserted_before = connection.total_changes
             batch: list[tuple[Any, ...]] = []
             try:
-                for message in parse_message_file(path, data_dir):
+                for message in parse_message_file(path, data_dir, photo_index):
                     if allowed_senders is not None and message.sender not in allowed_senders:
                         stats["messages_skipped_other_senders"] += 1
                         continue
@@ -254,6 +265,21 @@ def import_messages(
         ).fetchone()
         stats["oldest_timestamp"] = date_row["oldest_timestamp"]
         stats["newest_timestamp"] = date_row["newest_timestamp"]
+        photo_row = connection.execute(
+            """
+            SELECT
+                SUM(CASE WHEN attachment_path IS NOT NULL THEN 1 ELSE 0 END)
+                    AS matched,
+                SUM(CASE WHEN attachment_path IS NULL THEN 1 ELSE 0 END)
+                    AS unavailable
+            FROM messages
+            WHERE message_type = 'photo'
+            """
+        ).fetchone()
+        stats["photo_references_matched"] = int(photo_row["matched"] or 0)
+        stats["photo_references_unavailable"] = int(
+            photo_row["unavailable"] or 0
+        )
         connection.execute(
             "INSERT INTO app_metadata(key, value) VALUES ('import_summary', ?)",
             (json.dumps(stats, ensure_ascii=False),),
