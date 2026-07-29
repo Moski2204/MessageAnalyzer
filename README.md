@@ -25,9 +25,19 @@ environment's Python directly:
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## Start
+## Easy Terminal Start
 
-For normal use, run:
+Open PowerShell or the VS Code terminal and run:
+
+```powershell
+ammu
+```
+
+Click <http://127.0.0.1:5000> and keep the terminal open while using the app.
+Press **Ctrl+C** to stop it. If `ammu` is initially unavailable, open a new
+PowerShell terminal or reload your PowerShell profile.
+
+You can also start the app directly from the project folder:
 
 ```powershell
 .\.venv\Scripts\python.exe app.py

@@ -44,6 +44,7 @@ DATA_DIR = BASE_DIR / "data"
 PHOTO_DIR = DATA_DIR / "photos"
 DATABASE_PATH = BASE_DIR / "instance" / "messages.db"
 REPORTS_DIR = BASE_DIR / "reports"
+LOCAL_APP_URL = "http://127.0.0.1:5000"
 DATABASE_UNAVAILABLE_MESSAGE = (
     "The local message database could not be found. Restore "
     "instance/messages.db from your backup before using the application."
@@ -427,6 +428,9 @@ def photo(filename: str):
 
 def main() -> None:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    print("Message Analyzer is starting.", flush=True)
+    print(f"\nOpen the app here:\n{LOCAL_APP_URL}\n", flush=True)
+    print("Press Ctrl+C to stop the server.\n", flush=True)
     app.run(
         host="127.0.0.1",
         port=5000,

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, redirect_stdout
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -528,16 +529,21 @@ class MessageAnalyzerTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(stored_count, 1)
 
-    def test_normal_start_disables_debug_and_reloader(self):
+    def test_direct_start_prints_url_and_disables_debug_and_reloader(self):
         import app as app_module
 
+        output = io.StringIO()
         with (
             patch("sys.argv", ["app.py"]),
             patch.object(app_module, "REPORTS_DIR", self.reports),
             patch.object(app_module.app, "run") as run,
+            redirect_stdout(output),
         ):
             app_module.main()
 
+        self.assertIn("Message Analyzer is starting.", output.getvalue())
+        self.assertEqual(output.getvalue().count(app_module.LOCAL_APP_URL), 1)
+        self.assertIn("Press Ctrl+C to stop the server.", output.getvalue())
         run.assert_called_once_with(
             host="127.0.0.1",
             port=5000,
