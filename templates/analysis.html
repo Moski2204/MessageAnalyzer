@@ -4,119 +4,91 @@
   <section class="page-heading compact">
     <p class="eyebrow">Descriptive measurements</p>
     <h1>Analysis</h1>
-    <p>These summaries describe measurable activity. They do not establish feelings, motives, honesty, compatibility, or intent.</p>
+    <p>Choose a date range or explicitly select the full conversation. Opening this page never starts a calculation.</p>
   </section>
 
-  <form class="panel form-grid" method="post" action="{{ url_for('analysis_page') }}">
+  {% if cache_recovered %}
+    <div class="notice warning">A damaged analysis cache was set aside and a new empty cache was created. Your message database was not changed.</div>
+  {% endif %}
+
+  {% if active_job %}
+    <div class="notice">
+      <strong>Analysis currently running.</strong>
+      {{ "{:,}".format(active_job.processed_messages) }} of {{ "{:,}".format(active_job.total_messages) }} messages processed.
+      <a href="{{ url_for('analysis_job_page', job_id=active_job.job_id) }}">View progress</a>
+    </div>
+  {% endif %}
+
+  <form class="panel form-grid" method="post" action="{{ url_for('start_analysis') }}">
+    <input type="hidden" name="action_token" value="{{ action_token }}">
     <label>
       Start date
-      <input type="date" name="start_date" value="{{ start_date }}">
+      <input type="date" name="start_date" value="{{ values.start_date }}">
     </label>
     <label>
       End date
-      <input type="date" name="end_date" value="{{ end_date }}">
+      <input type="date" name="end_date" value="{{ values.end_date }}">
     </label>
     <label>
       Frequent words
       <select name="top_n">
         {% for size in [20, 50, 100] %}
-          <option value="{{ size }}" {% if top_n == size %}selected{% endif %}>Top {{ size }}</option>
+          <option value="{{ size }}" {% if values.top_n == size %}selected{% endif %}>Top {{ size }}</option>
         {% endfor %}
       </select>
     </label>
+    <label class="checkbox-label wide">
+      <input type="checkbox" name="full_conversation" value="1" {% if values.full_conversation %}checked{% endif %}>
+      <span><strong>Full Conversation</strong><small>Ignore the date fields and analyze every message.</small></span>
+    </label>
     <label class="wide">
       Stop words (editable)
-      <textarea name="stop_words" rows="5">{{ stop_words }}</textarea>
+      <textarea name="stop_words" rows="5">{{ values.stop_words }}</textarea>
     </label>
+    <div class="notice warning wide">
+      A full-conversation analysis may take several minutes the first time. It runs in the background and is reused from the local cache afterward.
+    </div>
     <div class="wide actions">
-      <button class="button primary" type="submit">Run Analysis</button>
+      <button class="button primary" type="submit">Analyze</button>
     </div>
   </form>
 
-  {% if result.total_messages %}
-    <div class="stats-grid small-grid">
-      <article class="stat"><span>Messages measured</span><strong>{{ "{:,}".format(result.total_messages) }}</strong></article>
-      <article class="stat"><span>Words analysed</span><strong>{{ "{:,}".format(result.words.total) }}</strong></article>
-      <article class="stat"><span>Sentiment analysed</span><strong>{{ "{:,}".format(result.sentiment.analyzed) }}</strong></article>
-      <article class="stat"><span>Sentiment skipped</span><strong>{{ "{:,}".format(result.sentiment.skipped) }}</strong></article>
-    </div>
-
-    <section class="analysis-section">
-      <h2>1. Response-Time Analysis</h2>
-      <p class="section-note">Approximate: consecutive messages by one sender form a run. A response is timed from the last message of one run to the first message after the sender changes.</p>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Sender</th><th>Responses</th><th>Median</th><th>Average</th><th>Average ≤24h</th><th>Fastest</th><th>Slowest</th><th>&lt;5m</th><th>&lt;30m</th><th>&lt;1h</th><th>&lt;6h</th><th>&lt;24h</th><th>&gt;24h</th></tr></thead>
-        <tbody>{% for row in result.responses %}<tr><td>{{ row.sender }}</td><td>{{ row.count }}</td><td>{{ row.median }}</td><td>{{ row.average }}</td><td>{{ row.average_under_24h }}</td><td>{{ row.fastest }}</td><td>{{ row.slowest }}</td><td>{{ row.under_5m }}</td><td>{{ row.under_30m }}</td><td>{{ row.under_1h }}</td><td>{{ row.under_6h }}</td><td>{{ row.under_24h }}</td><td>{{ row.over_24h }}</td></tr>{% endfor %}</tbody>
-      </table></div>
-    </section>
-
-    <section class="analysis-section">
-      <h2>2. Frequent-Word Analysis</h2>
-      <p class="section-note">URLs, media placeholders, punctuation-only values, and the editable stop words are excluded. Original messages are unchanged.</p>
-      <h3>Full conversation</h3>
-      <div class="word-grid">{% for row in result.words.overall %}<div><strong>{{ row.word }}</strong><span>{{ "{:,}".format(row.count) }} · {{ "%.2f"|format(row.percentage) }}%</span></div>{% endfor %}</div>
-      {% for group in result.words.by_sender %}
-        <h3>{{ group.sender }} <small>({{ "{:,}".format(group.total) }} words)</small></h3>
-        <div class="word-grid">{% for row in group.words %}<div><strong>{{ row.word }}</strong><span>{{ "{:,}".format(row.count) }} · {{ "%.2f"|format(row.percentage) }}%</span></div>{% endfor %}</div>
-      {% endfor %}
-    </section>
-
-    <section class="analysis-section">
-      <h2>3. Sentiment Analysis</h2>
-      <p class="section-note">Method: {{ result.sentiment.method }}. Automated sentiment is approximate and primarily English-oriented.</p>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Group</th><th>Positive</th><th>Neutral</th><th>Negative</th><th>Average score</th></tr></thead>
-        <tbody>
-          <tr><td>Overall</td>{% for row in result.sentiment.overall %}<td>{{ "{:,}".format(row.count) }} ({{ "%.1f"|format(row.percentage) }}%)</td>{% endfor %}<td>{% if result.sentiment.average_score is not none %}{{ "%.3f"|format(result.sentiment.average_score) }}{% else %}—{% endif %}</td></tr>
-          {% for group in result.sentiment.by_sender %}<tr><td>{{ group.sender }}</td>{% for row in group.rows %}<td>{{ "{:,}".format(row.count) }} ({{ "%.1f"|format(row.percentage) }}%)</td>{% endfor %}<td>{% if group.average_score is not none %}{{ "%.3f"|format(group.average_score) }}{% else %}—{% endif %}</td></tr>{% endfor %}
-        </tbody>
-      </table></div>
-      <details>
-        <summary>Sentiment by month</summary>
-        <div class="table-wrap"><table><thead><tr><th>Month</th><th>Positive</th><th>Neutral</th><th>Negative</th></tr></thead><tbody>
-          {% for month in result.sentiment.by_month %}<tr><td>{{ month.month }}</td>{% for row in month.rows %}<td>{{ row.count }} ({{ "%.1f"|format(row.percentage) }}%)</td>{% endfor %}</tr>{% endfor %}
-        </tbody></table></div>
-      </details>
-      <div class="notice warning"><strong>Limitations:</strong> sarcasm, jokes, context, slang, emojis, Urdu, Arabic, Roman Urdu, and other non-English text may be misunderstood. A negative label does not prove hostility or harm. A positive label does not prove affection or sincerity.</div>
-    </section>
-
-    <section class="analysis-section">
-      <h2>4. Conversation Patterns</h2>
-      <p class="section-note">The data shows activity patterns in this export. These measurements may have several possible explanations and do not establish how either person felt.</p>
-      <h3>Activity and run balance</h3>
-      <div class="table-wrap"><table><thead><tr><th>Sender</th><th>Messages</th><th>Message share</th><th>Runs started</th><th>Run share</th></tr></thead><tbody>
-        {% for row in result.sender_activity %}<tr><td>{{ row.sender }}</td><td>{{ "{:,}".format(row.messages) }}</td><td>{{ "%.2f"|format(row.message_percentage) }}%</td><td>{{ "{:,}".format(row.runs) }}</td><td>{{ "%.2f"|format(row.run_percentage) }}%</td></tr>{% endfor %}
-      </tbody></table></div>
-
-      <h3>Message length and questions</h3>
-      <div class="table-wrap"><table><thead><tr><th>Sender</th><th>Average characters</th><th>Median characters</th><th>Questions</th><th>Question/message ratio</th></tr></thead><tbody>
-        {% for row in result.patterns.lengths %}<tr><td>{{ row.sender }}</td><td>{{ "%.1f"|format(row.average) }}</td><td>{{ "%.1f"|format(row.median) }}</td><td>{{ "{:,}".format(row.questions) }}</td><td>{{ "%.2f"|format(row.question_ratio) }}%</td></tr>{% endfor %}
-      </tbody></table></div>
-
-      <h3>Who sent the next message after long gaps</h3>
-      <div class="table-wrap"><table><thead><tr><th>Gap</th>{% for sender in result.senders %}<th>{{ sender }}</th>{% endfor %}</tr></thead><tbody>
-        {% for row in result.patterns.gap_resumers %}<tr><td>{{ row.threshold }}</td>{% for sender in row.senders %}<td>{{ "{:,}".format(sender.count) }}</td>{% endfor %}</tr>{% endfor %}
-      </tbody></table></div>
-
-      <h3>Recent monthly changes</h3>
-      <div class="table-wrap"><table><thead><tr><th>Month</th><th>Messages</th><th>Positive</th><th>Negative</th><th>Median response</th></tr></thead><tbody>
-        {% for row in result.patterns.periods %}<tr><td>{{ row.month }}</td><td>{{ "{:,}".format(row.messages) }}</td><td>{{ "%.1f"|format(row.positive_percentage) }}%</td><td>{{ "%.1f"|format(row.negative_percentage) }}%</td><td>{{ row.median_response }}</td></tr>{% endfor %}
-      </tbody></table></div>
-
-      <div class="two-column">
-        <div><h3>Highest-activity days</h3><ul>{% for row in result.patterns.high_activity_days %}<li>{{ row.day }} — {{ "{:,}".format(row.messages) }} messages</li>{% endfor %}</ul></div>
-        <div><h3>Longest inactive periods</h3><ul>{% for row in result.patterns.inactive_gaps %}<li>{{ row.duration }} · resumed {{ row.resumed_at }} by {{ row.sender }}</li>{% endfor %}</ul></div>
+  <section class="analysis-section">
+    <h2>Previous cached results</h2>
+    {% if recent_jobs %}
+      <div class="cache-list">
+        {% for cached in recent_jobs %}
+          <article class="panel cache-entry">
+            <div>
+              <strong>
+                {% if cached.settings.full_conversation %}
+                  Full Conversation
+                {% else %}
+                  {{ cached.settings.start_date }} to {{ cached.settings.end_date }}
+                {% endif %}
+              </strong>
+              <span>{{ "{:,}".format(cached.total_messages) }} messages</span>
+            </div>
+            <div>
+              <span>Calculated {{ cached.completed_at }}</span>
+              <span>{{ "%.1f"|format(cached.elapsed_seconds) }} seconds</span>
+            </div>
+            <a class="button secondary" href="{{ url_for('analysis_result', job_id=cached.job_id, cached=1) }}">Open cached result</a>
+          </article>
+        {% endfor %}
       </div>
-    </section>
+    {% else %}
+      <div class="notice">No completed analysis is cached yet.</div>
+    {% endif %}
+  </section>
 
-    <form method="post" action="{{ url_for('download_analysis_report') }}">
-      <input type="hidden" name="start_date" value="{{ start_date }}">
-      <input type="hidden" name="end_date" value="{{ end_date }}">
-      <input type="hidden" name="top_n" value="{{ top_n }}">
-      <textarea class="hidden-field" name="stop_words" aria-hidden="true">{{ stop_words }}</textarea>
-      <button class="button primary" type="submit">Download Analysis Report</button>
+  <section class="analysis-section">
+    <h2>Analysis cache</h2>
+    <p>The separate local cache currently uses {{ cache_size }}. Clearing it does not touch messages.db, data/, photos, exports, or reports.</p>
+    <form method="post" action="{{ url_for('clear_analysis_cache') }}" onsubmit="return confirm('Clear all cached analysis results? Your messages and photos will remain untouched.');">
+      <input type="hidden" name="action_token" value="{{ action_token }}">
+      <input type="hidden" name="confirm" value="clear">
+      <button class="button secondary" type="submit">Clear Analysis Cache</button>
     </form>
-  {% else %}
-    <div class="notice">No messages were available for this analysis.</div>
-  {% endif %}
+  </section>
 {% endblock %}

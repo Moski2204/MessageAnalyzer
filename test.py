@@ -4,6 +4,8 @@ import io
 import json
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import closing, redirect_stdout
 from pathlib import Path
@@ -13,6 +15,14 @@ from unittest.mock import patch
 from bs4 import BeautifulSoup
 
 from analysis import analyze_messages, parse_stop_words
+from analysis_jobs import (
+    ANALYSIS_VERSION,
+    AnalysisCache,
+    AnalysisJobManager,
+    AnalysisSettings,
+    build_cache_key,
+    source_database_fingerprint,
+)
 from database import (
     clean_search_filters,
     connect_readonly,
@@ -216,6 +226,7 @@ class MessageAnalyzerTests(unittest.TestCase):
         self.data = self.root / "data"
         self.data.mkdir()
         self.database = self.root / "instance" / "messages.db"
+        self.analysis_cache = self.root / "instance" / "analysis_cache.db"
         self.reports = self.root / "reports"
 
         # Export order is newest-first. One duplicate crosses the two chunks.
@@ -333,6 +344,7 @@ class MessageAnalyzerTests(unittest.TestCase):
 
     def test_analysis_runs_stop_words_and_safe_report(self):
         seed_database(self.database, standard_rows())
+        progress_updates = []
         with connect_readonly(self.database) as connection:
             result = analyze_messages(
                 connection,
@@ -340,6 +352,8 @@ class MessageAnalyzerTests(unittest.TestCase):
                 date_to_unix("2024-01-02", end=True),
                 parse_stop_words("the first"),
                 20,
+                progress_callback=lambda *values: progress_updates.append(values),
+                chunk_size=2,
             )
             self.assertEqual(result["total_messages"], 8)
             response_counts = {
@@ -349,6 +363,17 @@ class MessageAnalyzerTests(unittest.TestCase):
             self.assertEqual(response_counts["B"], 1)
             self.assertNotIn(
                 "first", [row["word"] for row in result["words"]["overall"]]
+            )
+            self.assertEqual(progress_updates[-1][0], "Building conversation patterns")
+            self.assertEqual(progress_updates[-1][2:], (8, 8))
+            self.assertTrue(
+                {
+                    "Loading messages",
+                    "Calculating response times",
+                    "Counting frequent words",
+                    "Calculating sentiment",
+                    "Building conversation patterns",
+                }.issubset({update[0] for update in progress_updates})
             )
 
             filters = clean_search_filters(
@@ -376,6 +401,7 @@ class MessageAnalyzerTests(unittest.TestCase):
         with (
             patch.object(app_module, "DATA_DIR", self.data),
             patch.object(app_module, "DATABASE_PATH", self.database),
+            patch.object(app_module, "ANALYSIS_CACHE_PATH", self.analysis_cache),
             patch.object(app_module, "REPORTS_DIR", self.reports),
         ):
             app_module.app.config["TESTING"] = True
@@ -388,17 +414,14 @@ class MessageAnalyzerTests(unittest.TestCase):
                     "/search/report?q=First+message&mode=phrase&per_page=25"
                 ),
                 client.get(f"/conversation?target={target}&direction=asc"),
-                client.post(
-                    "/analysis",
-                    data={
-                        "start_date": "2024-01-02",
-                        "end_date": "2024-01-02",
-                        "top_n": "20",
-                        "stop_words": "the and",
-                    },
-                ),
+                client.get("/analysis"),
             ]
             self.assertTrue(all(response.status_code == 200 for response in checks))
+            analysis_html = checks[-1].get_data(as_text=True)
+            self.assertIn('name="full_conversation"', analysis_html)
+            self.assertIn(">Analyze<", analysis_html)
+            self.assertIn("Opening this page never starts a calculation.", analysis_html)
+            self.assertIsNone(app_module._analysis_manager().active_job())
             home_html = checks[0].get_data(as_text=True)
             self.assertNotIn("hot_reload.js", home_html)
             home = BeautifulSoup(home_html, "html.parser")
@@ -431,17 +454,390 @@ class MessageAnalyzerTests(unittest.TestCase):
             self.assertEqual(search_download.status_code, 200)
             self.assertIn("attachment", search_download.headers["Content-Disposition"])
             search_download.close()
-            analysis_download = client.post(
-                "/analysis/download",
+
+            token = app_module.app.config["ANALYSIS_ACTION_TOKEN"]
+            started = client.post(
+                "/analysis/start",
                 data={
+                    "action_token": token,
                     "start_date": "2024-01-02",
                     "end_date": "2024-01-02",
                     "top_n": "20",
                     "stop_words": "the and",
                 },
             )
+            self.assertEqual(started.status_code, 303)
+            job_id = started.headers["Location"].rstrip("/").split("/")[-1]
+            manager = app_module._analysis_manager()
+            completed = manager.wait_for_job(job_id)
+            self.assertIsNotNone(completed)
+            self.assertEqual(completed["status"], "complete")
+
+            status_response = client.get(f"/analysis/jobs/{job_id}/status")
+            self.assertEqual(status_response.status_code, 200)
+            self.assertEqual(status_response.get_json()["status"], "complete")
+            self.assertEqual(status_response.headers["Cache-Control"], "no-store, max-age=0")
+            result_response = client.get(f"/analysis/results/{job_id}")
+            self.assertEqual(result_response.status_code, 200)
+            self.assertIn("Analysis Results", result_response.get_data(as_text=True))
+
+            cached = client.post(
+                "/analysis/start",
+                data={
+                    "action_token": token,
+                    "start_date": "2024-01-02",
+                    "end_date": "2024-01-02",
+                    "top_n": "20",
+                    "stop_words": "the and",
+                },
+            )
+            self.assertEqual(cached.status_code, 303)
+            self.assertIn(f"/analysis/results/{job_id}", cached.headers["Location"])
+            self.assertIn("cached=1", cached.headers["Location"])
+
+            recalculated = client.post(
+                f"/analysis/results/{job_id}/recalculate",
+                data={"action_token": token},
+            )
+            self.assertEqual(recalculated.status_code, 303)
+            recalculated_id = (
+                recalculated.headers["Location"].rstrip("/").split("/")[-1]
+            )
+            self.assertNotEqual(recalculated_id, job_id)
+            self.assertEqual(
+                manager.wait_for_job(recalculated_id)["status"], "complete"
+            )
+
+            def fail_if_recomputed(*_args, **_kwargs):
+                raise AssertionError("cached download must not recompute")
+
+            manager.analyzer = fail_if_recomputed
+            analysis_download = client.post(
+                f"/analysis/results/{recalculated_id}/download",
+                data={"action_token": token},
+            )
             self.assertEqual(analysis_download.status_code, 200)
+            self.assertIn(
+                "attachment", analysis_download.headers["Content-Disposition"]
+            )
             analysis_download.close()
+            message_bytes = self.database.read_bytes()
+            message_stat = self.database.stat()
+            self.assertEqual(
+                client.post(
+                    "/analysis/cache/clear",
+                    data={"action_token": token},
+                ).status_code,
+                400,
+            )
+            cleared = client.post(
+                "/analysis/cache/clear",
+                data={"action_token": token, "confirm": "clear"},
+            )
+            self.assertEqual(cleared.status_code, 303)
+            self.assertEqual(manager.recent_completed(), [])
+            self.assertEqual(self.database.read_bytes(), message_bytes)
+            unchanged_stat = self.database.stat()
+            self.assertEqual(unchanged_stat.st_size, message_stat.st_size)
+            self.assertEqual(
+                unchanged_stat.st_mtime_ns, message_stat.st_mtime_ns
+            )
+
+    def test_analysis_requires_explicit_scope_and_get_stays_fast(self):
+        import app as app_module
+
+        seed_database(self.database, standard_rows())
+        with (
+            patch.object(app_module, "DATABASE_PATH", self.database),
+            patch.object(app_module, "ANALYSIS_CACHE_PATH", self.analysis_cache),
+        ):
+            app_module.app.config["TESTING"] = True
+            client = app_module.app.test_client()
+            started = time.monotonic()
+            landing = client.get("/analysis")
+            elapsed = time.monotonic() - started
+            self.assertEqual(landing.status_code, 200)
+            self.assertLess(elapsed, 2)
+            self.assertIn("may take several minutes", landing.get_data(as_text=True))
+
+            token = app_module.app.config["ANALYSIS_ACTION_TOKEN"]
+            blank = client.post(
+                "/analysis/start",
+                data={"action_token": token, "top_n": "20"},
+            )
+            reversed_range = client.post(
+                "/analysis/start",
+                data={
+                    "action_token": token,
+                    "start_date": "2024-01-03",
+                    "end_date": "2024-01-02",
+                },
+            )
+            empty_range = client.post(
+                "/analysis/start",
+                data={
+                    "action_token": token,
+                    "start_date": "2025-01-01",
+                    "end_date": "2025-01-02",
+                },
+            )
+            self.assertEqual(blank.status_code, 400)
+            self.assertEqual(reversed_range.status_code, 400)
+            self.assertEqual(empty_range.status_code, 400)
+            self.assertIsNone(app_module._analysis_manager().active_job())
+
+            full = client.post(
+                "/analysis/start",
+                data={
+                    "action_token": token,
+                    "full_conversation": "1",
+                    "top_n": "20",
+                    "stop_words": "the and",
+                },
+            )
+            self.assertEqual(full.status_code, 303)
+            job_id = full.headers["Location"].rstrip("/").split("/")[-1]
+            self.assertEqual(
+                app_module._analysis_manager().wait_for_job(job_id)["status"],
+                "complete",
+            )
+
+    def test_single_background_worker_does_not_block_submission(self):
+        seed_database(self.database, standard_rows())
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocking_analyzer(connection, *args, **kwargs):
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError("test worker was not released")
+            return analyze_messages(connection, *args, **kwargs)
+
+        manager = AnalysisJobManager(
+            self.database,
+            self.analysis_cache,
+            analyzer=blocking_analyzer,
+            chunk_size=2,
+        )
+        settings = AnalysisSettings("", "", True, 20, "the and")
+        started = time.monotonic()
+        first = manager.submit(settings)
+        submit_elapsed = time.monotonic() - started
+        self.assertEqual(first["outcome"], "started")
+        self.assertLess(submit_elapsed, 2)
+        self.assertTrue(entered.wait(1))
+        try:
+            second = manager.submit(settings)
+            self.assertEqual(second["outcome"], "busy")
+            self.assertEqual(
+                second["job"]["job_id"], first["job"]["job_id"]
+            )
+        finally:
+            release.set()
+        completed = manager.wait_for_job(first["job"]["job_id"])
+        self.assertEqual(completed["status"], "complete")
+        self.assertEqual(completed["processed_messages"], 8)
+        self.assertEqual(completed["progress"], 100)
+
+    def test_analysis_cache_keys_cover_all_invalidation_inputs(self):
+        seed_database(self.database, standard_rows())
+        fingerprint = source_database_fingerprint(self.database)
+        base = AnalysisSettings(
+            "2024-01-02", "2024-01-02", False, 20, "the and"
+        )
+        base_key = build_cache_key(base, fingerprint)
+        equivalent_stop_words = AnalysisSettings(
+            "2024-01-02", "2024-01-02", False, 20, "and   the"
+        )
+        self.assertEqual(
+            base_key, build_cache_key(equivalent_stop_words, fingerprint)
+        )
+        variants = [
+            AnalysisSettings(
+                "2024-01-01", "2024-01-02", False, 20, "the and"
+            ),
+            AnalysisSettings("", "", True, 20, "the and"),
+            AnalysisSettings(
+                "2024-01-02", "2024-01-02", False, 50, "the and"
+            ),
+            AnalysisSettings(
+                "2024-01-02", "2024-01-02", False, 20, "the and new"
+            ),
+        ]
+        for settings in variants:
+            with self.subTest(settings=settings):
+                self.assertNotEqual(
+                    base_key, build_cache_key(settings, fingerprint)
+                )
+        self.assertNotEqual(
+            base_key,
+            build_cache_key(base, fingerprint, ANALYSIS_VERSION + "-changed"),
+        )
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE messages SET message_text = message_text || 'x' WHERE id = 1"
+            )
+            connection.commit()
+        changed_fingerprint = source_database_fingerprint(self.database)
+        self.assertNotEqual(
+            fingerprint["digest"], changed_fingerprint["digest"]
+        )
+        self.assertNotEqual(
+            base_key, build_cache_key(base, changed_fingerprint)
+        )
+
+    def test_source_change_invalidates_cached_pages_and_downloads(self):
+        import app as app_module
+
+        seed_database(self.database, standard_rows())
+        with (
+            patch.object(app_module, "DATABASE_PATH", self.database),
+            patch.object(app_module, "ANALYSIS_CACHE_PATH", self.analysis_cache),
+            patch.object(app_module, "REPORTS_DIR", self.reports),
+        ):
+            app_module.app.config["TESTING"] = True
+            client = app_module.app.test_client()
+            token = app_module.app.config["ANALYSIS_ACTION_TOKEN"]
+            submitted = client.post(
+                "/analysis/start",
+                data={
+                    "action_token": token,
+                    "start_date": "2024-01-02",
+                    "end_date": "2024-01-02",
+                    "top_n": "20",
+                    "stop_words": "the and",
+                },
+            )
+            job_id = submitted.headers["Location"].rstrip("/").split("/")[-1]
+            manager = app_module._analysis_manager()
+            self.assertEqual(
+                manager.wait_for_job(job_id)["status"], "complete"
+            )
+            self.assertEqual(
+                client.get(f"/analysis/results/{job_id}").status_code,
+                200,
+            )
+
+            with closing(sqlite3.connect(self.database)) as connection:
+                connection.execute(
+                    """
+                    UPDATE messages
+                    SET message_text = message_text || 'x'
+                    WHERE id = 1
+                    """
+                )
+                connection.commit()
+
+            landing_html = client.get("/analysis").get_data(as_text=True)
+            self.assertNotIn(job_id, landing_html)
+            stale_result = client.get(f"/analysis/results/{job_id}")
+            self.assertEqual(stale_result.status_code, 409)
+            self.assertIn(
+                "no longer valid", stale_result.get_data(as_text=True)
+            )
+            stale_download = client.post(
+                f"/analysis/results/{job_id}/download",
+                data={"action_token": token},
+            )
+            self.assertEqual(stale_download.status_code, 303)
+
+    def test_interrupted_corrupt_and_cleared_cache_never_change_messages(self):
+        seed_database(self.database, standard_rows())
+        source_before = self.database.read_bytes()
+        data_before = {
+            path.name: path.read_bytes() for path in self.data.glob("*.html")
+        }
+        settings = AnalysisSettings("", "", True, 20, "the and")
+        fingerprint = source_database_fingerprint(self.database)
+        cache = AnalysisCache(self.analysis_cache)
+        stale_id = "a" * 32
+        cache.create_job(
+            stale_id,
+            build_cache_key(settings, fingerprint),
+            settings,
+            fingerprint,
+            8,
+        )
+
+        restarted = AnalysisJobManager(self.database, self.analysis_cache)
+        stale = restarted.get_job(stale_id)
+        self.assertEqual(stale["status"], "interrupted")
+        self.assertIn("interrupted", stale["error"].lower())
+        self.assertTrue(restarted.clear_cache())
+        self.assertEqual(restarted.recent_completed(), [])
+        self.assertEqual(self.database.read_bytes(), source_before)
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in self.data.glob("*.html")},
+            data_before,
+        )
+
+        self.analysis_cache.unlink()
+        self.assertEqual(restarted.recent_completed(), [])
+        self.assertTrue(self.analysis_cache.is_file())
+        self.analysis_cache.write_bytes(b"runtime cache damage")
+        self.assertEqual(restarted.recent_completed(), [])
+        self.assertTrue(restarted.cache.recovered_corrupt_cache)
+
+        corrupt_path = self.root / "instance" / "corrupt-analysis-cache.db"
+        corrupt_path.write_bytes(b"not a SQLite database")
+        recovered = AnalysisCache(corrupt_path)
+        self.assertTrue(recovered.recovered_corrupt_cache)
+        self.assertTrue(corrupt_path.is_file())
+        self.assertTrue(
+            list(corrupt_path.parent.glob("corrupt-analysis-cache.corrupt-*.db"))
+        )
+        self.assertEqual(self.database.read_bytes(), source_before)
+
+    def test_background_failures_are_sanitized(self):
+        seed_database(self.database, standard_rows())
+        private_marker = "PRIVATE-MESSAGE-BODY-MUST-NOT-LEAK"
+
+        def failing_analyzer(*_args, **_kwargs):
+            raise RuntimeError(private_marker)
+
+        manager = AnalysisJobManager(
+            self.database,
+            self.analysis_cache,
+            analyzer=failing_analyzer,
+        )
+        submitted = manager.submit(
+            AnalysisSettings("", "", True, 20, "the and")
+        )
+        failed = manager.wait_for_job(submitted["job"]["job_id"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertNotIn(private_marker, failed["error"])
+        self.assertIsNone(failed["result"])
+
+        transition_cache = self.root / "instance" / "transition-cache.db"
+        transition_manager = AnalysisJobManager(
+            self.database, transition_cache
+        )
+        original_set_running = transition_manager.cache.set_running
+
+        def fail_transition(_job_id):
+            raise sqlite3.OperationalError("simulated cache transition failure")
+
+        transition_manager.cache.set_running = fail_transition
+        transition_submission = transition_manager.submit(
+            AnalysisSettings("", "", True, 20, "the and")
+        )
+        transition_failed = transition_manager.wait_for_job(
+            transition_submission["job"]["job_id"]
+        )
+        self.assertEqual(transition_failed["status"], "failed")
+        self.assertIsNone(transition_manager.active_job())
+
+        transition_manager.cache.set_running = original_set_running
+        retried = transition_manager.submit(
+            AnalysisSettings("", "", True, 20, "the and")
+        )
+        self.assertEqual(
+            transition_manager.wait_for_job(retried["job"]["job_id"])[
+                "status"
+            ],
+            "complete",
+        )
 
     def test_missing_database_shows_one_restore_notice_without_creating_a_file(self):
         import app as app_module
@@ -458,10 +854,24 @@ class MessageAnalyzerTests(unittest.TestCase):
 
             home = client.get("/")
             redirected_search = client.get("/search", follow_redirects=True)
+            redirected_analysis = client.get(
+                "/analysis", follow_redirects=True
+            )
+            blocked_analysis_start = client.post(
+                "/analysis/start",
+                data={
+                    "action_token": app_module.app.config[
+                        "ANALYSIS_ACTION_TOKEN"
+                    ],
+                    "full_conversation": "1",
+                },
+            )
 
         self.assertEqual(home.status_code, 200)
         self.assertEqual(redirected_search.status_code, 200)
-        for response in (home, redirected_search):
+        self.assertEqual(redirected_analysis.status_code, 200)
+        self.assertEqual(blocked_analysis_start.status_code, 302)
+        for response in (home, redirected_search, redirected_analysis):
             html = response.get_data(as_text=True)
             self.assertEqual(html.count(expected_message), 1)
             self.assertEqual(html.count("Database unavailable."), 1)
@@ -488,9 +898,11 @@ class MessageAnalyzerTests(unittest.TestCase):
             home = client.get("/")
             blocked_search = client.get("/search")
             redirected_search = client.get("/search", follow_redirects=True)
+            blocked_analysis = client.get("/analysis")
 
         self.assertEqual(home.status_code, 200)
         self.assertEqual(blocked_search.status_code, 302)
+        self.assertEqual(blocked_analysis.status_code, 302)
         self.assertTrue(blocked_search.headers["Location"].endswith("/"))
         self.assertEqual(redirected_search.status_code, 200)
         for response in (home, redirected_search):

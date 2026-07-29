@@ -106,9 +106,18 @@ folder at once.
 - **Full Conversation** pages through 50, 100, or 250 messages without loading
   the whole export into the browser. Photos are loaded only for messages on the
   current page and use browser lazy loading.
-- **Analysis** accepts an optional date range and editable stop-word list. It
-  shows response timing, frequent words, approximate local sentiment, and
-  descriptive conversation patterns.
+- **Analysis** requires either an explicit date range or the **Full
+  Conversation** option. Calculations start only after **Analyze** is clicked,
+  run in one local background worker, and expose progress without blocking the
+  page. Completed summaries are reused from `instance/analysis_cache.db`.
+
+The analysis cache is separate from the read-only `instance/messages.db`. Its
+keys include the selected scope, stop words, word limit, analysis version, and
+a quick source-database fingerprint. Changing any of those inputs creates a
+different result. **Recalculate Analysis** bypasses a matching cache entry;
+**Clear Analysis Cache** removes only cached analysis records. The cache is
+inside the already ignored `instance/` directory and stores summary JSON, not
+message bodies or photo data.
 
 Response time is approximate. Consecutive messages from one sender form a run;
 when the sender changes, time is measured from the last message of the prior

@@ -7,6 +7,9 @@ import logging
 import math
 import re
 import secrets
+import sqlite3
+import threading
+from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -24,13 +27,17 @@ from flask import (
 )
 from markupsafe import Markup, escape
 
-from analysis import DEFAULT_STOP_WORDS, WORD_RE, analyze_messages, parse_stop_words
+from analysis import DEFAULT_STOP_WORDS, WORD_RE
+from analysis_jobs import (
+    AnalysisJobManager,
+    AnalysisSettings,
+    valid_job_id,
+)
 from database import (
     clean_search_filters,
     connect_readonly,
     conversation_page,
     database_ready,
-    date_to_unix,
     get_database_summary,
     get_senders,
     page_for_message,
@@ -43,6 +50,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 PHOTO_DIR = DATA_DIR / "photos"
 DATABASE_PATH = BASE_DIR / "instance" / "messages.db"
+ANALYSIS_CACHE_PATH = BASE_DIR / "instance" / "analysis_cache.db"
 REPORTS_DIR = BASE_DIR / "reports"
 LOCAL_APP_URL = "http://127.0.0.1:5000"
 DATABASE_UNAVAILABLE_MESSAGE = (
@@ -53,8 +61,12 @@ DATABASE_UNAVAILABLE_MESSAGE = (
 app = Flask(__name__)
 app.config.update(
     SECRET_KEY=secrets.token_hex(32),
+    ANALYSIS_ACTION_TOKEN=secrets.token_urlsafe(32),
     MAX_CONTENT_LENGTH=1_000_000,
 )
+
+_analysis_managers: dict[tuple[str, str], AnalysisJobManager] = {}
+_analysis_managers_lock = threading.Lock()
 
 # Access logs include query strings. Disable them so private search terms are
 # never echoed to the terminal.
@@ -342,63 +354,265 @@ def conversation():
     )
 
 
-def _analysis_inputs() -> tuple[str, str, int, str]:
-    start_date = request.values.get("start_date", "").strip()
-    end_date = request.values.get("end_date", "").strip()
+def _analysis_manager() -> AnalysisJobManager:
+    key = (
+        str(DATABASE_PATH.resolve()),
+        str(ANALYSIS_CACHE_PATH.resolve()),
+    )
+    with _analysis_managers_lock:
+        manager = _analysis_managers.get(key)
+        if manager is None:
+            manager = AnalysisJobManager(DATABASE_PATH, ANALYSIS_CACHE_PATH)
+            _analysis_managers[key] = manager
+        return manager
+
+
+def _analysis_action_token() -> str:
+    return str(app.config["ANALYSIS_ACTION_TOKEN"])
+
+
+def _require_analysis_action_token() -> None:
+    supplied = request.form.get("action_token", "")
+    if not secrets.compare_digest(supplied, _analysis_action_token()):
+        abort(400)
+
+
+def _analysis_form_values() -> dict[str, Any]:
     try:
-        top_n = int(request.values.get("top_n", 20))
-    except ValueError:
+        top_n = int(request.form.get("top_n", 20))
+    except (TypeError, ValueError):
         top_n = 20
     if top_n not in {20, 50, 100}:
         top_n = 20
-    stop_words = request.values.get("stop_words")
+    stop_words = request.form.get("stop_words")
     if stop_words is None:
         stop_words = DEFAULT_STOP_WORDS
-    return start_date, end_date, top_n, stop_words[:10000]
+    return {
+        "start_date": request.form.get("start_date", "").strip()[:10],
+        "end_date": request.form.get("end_date", "").strip()[:10],
+        "full_conversation": request.form.get("full_conversation") == "1",
+        "top_n": top_n,
+        "stop_words": stop_words[:10_000],
+    }
 
 
-@app.route("/analysis", methods=["GET", "POST"])
+def _validated_analysis_settings(
+    values: dict[str, Any],
+) -> tuple[AnalysisSettings | None, str | None]:
+    if values["full_conversation"]:
+        return (
+            AnalysisSettings(
+                start_date="",
+                end_date="",
+                full_conversation=True,
+                top_n=values["top_n"],
+                stop_words=values["stop_words"],
+            ),
+            None,
+        )
+    if not values["start_date"] or not values["end_date"]:
+        return (
+            None,
+            "Choose both a start date and an end date, or select Full Conversation.",
+        )
+    try:
+        start = datetime.strptime(values["start_date"], "%Y-%m-%d")
+        end = datetime.strptime(values["end_date"], "%Y-%m-%d")
+    except ValueError:
+        return None, "Enter a valid start date and end date."
+    if start > end:
+        return None, "The start date cannot be after the end date."
+    return AnalysisSettings(**values), None
+
+
+def _cache_size_label(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} bytes"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+def _render_analysis_landing(
+    values: dict[str, Any] | None = None,
+    status_code: int = 200,
+):
+    manager = _analysis_manager()
+    if values is None:
+        values = {
+            "start_date": "",
+            "end_date": "",
+            "full_conversation": False,
+            "top_n": 20,
+            "stop_words": DEFAULT_STOP_WORDS,
+        }
+    response = render_template(
+        "analysis.html",
+        values=values,
+        recent_jobs=manager.recent_completed(),
+        active_job=manager.active_job(),
+        cache_size=_cache_size_label(manager.cache.size_bytes()),
+        cache_recovered=manager.cache.recovered_corrupt_cache,
+        action_token=_analysis_action_token(),
+    )
+    return response, status_code
+
+
+@app.get("/analysis")
 def analysis_page():
     blocked = _ready_or_redirect()
     if blocked:
         return blocked
-    start_date, end_date, top_n, stop_words = _analysis_inputs()
-    with connect_readonly(DATABASE_PATH) as connection:
-        result = analyze_messages(
-            connection,
-            date_to_unix(start_date),
-            date_to_unix(end_date, end=True),
-            parse_stop_words(stop_words),
-            top_n,
-        )
-    if not result["total_messages"]:
-        flash("No messages were available for this analysis.", "warning")
-    return render_template(
-        "analysis.html",
-        result=result,
-        start_date=start_date,
-        end_date=end_date,
-        top_n=top_n,
-        stop_words=stop_words,
-    )
+    return _render_analysis_landing()
 
 
-@app.post("/analysis/download")
-def download_analysis_report():
+@app.post("/analysis/start")
+def start_analysis():
     blocked = _ready_or_redirect()
     if blocked:
         return blocked
-    start_date, end_date, top_n, stop_words = _analysis_inputs()
-    with connect_readonly(DATABASE_PATH) as connection:
-        result = analyze_messages(
-            connection,
-            date_to_unix(start_date),
-            date_to_unix(end_date, end=True),
-            parse_stop_words(stop_words),
-            top_n,
+    _require_analysis_action_token()
+    values = _analysis_form_values()
+    settings, validation_error = _validated_analysis_settings(values)
+    if validation_error:
+        flash(validation_error, "warning")
+        return _render_analysis_landing(values, 400)
+    assert settings is not None
+    try:
+        submission = _analysis_manager().submit(settings)
+    except (OSError, sqlite3.Error):
+        flash(
+            "Analysis could not start because the local databases were unavailable.",
+            "error",
         )
+        return _render_analysis_landing(values, 503)
+    job = submission["job"]
+    if submission["outcome"] == "empty":
+        flash("No messages exist in the selected date range.", "warning")
+        return _render_analysis_landing(values, 400)
+    if submission["outcome"] == "cached":
+        return redirect(
+            url_for("analysis_result", job_id=job["job_id"], cached=1),
+            code=303,
+        )
+    if submission["outcome"] == "busy":
+        flash("Another analysis is already running.", "warning")
+    return redirect(
+        url_for("analysis_job_page", job_id=job["job_id"]),
+        code=303,
+    )
+
+
+@app.get("/analysis/jobs/<job_id>")
+def analysis_job_page(job_id: str):
+    blocked = _ready_or_redirect()
+    if blocked:
+        return blocked
+    if not valid_job_id(job_id):
+        abort(404)
+    job = _analysis_manager().get_job(job_id)
+    if job is None:
+        abort(404)
+    if job["status"] == "complete":
+        return redirect(
+            url_for("analysis_result", job_id=job_id, cached=0),
+            code=303,
+        )
+    return render_template(
+        "analysis_status.html",
+        job=job,
+        status_url=url_for("analysis_job_status", job_id=job_id),
+    )
+
+
+@app.get("/analysis/jobs/<job_id>/status")
+def analysis_job_status(job_id: str):
+    if not valid_job_id(job_id):
+        abort(404)
+    job = _analysis_manager().get_job(job_id)
+    if job is None:
+        abort(404)
+    payload = {
+        "status": job["status"],
+        "stage": job["stage"],
+        "percentage": job["progress"],
+        "processed_messages": job["processed_messages"],
+        "total_messages": job["total_messages"],
+        "elapsed_seconds": job["elapsed_seconds"],
+        "error": job["error"],
+        "result_url": (
+            url_for("analysis_result", job_id=job_id, cached=0)
+            if job["status"] == "complete"
+            else None
+        ),
+    }
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
+
+
+@app.get("/analysis/results/<job_id>")
+def analysis_result(job_id: str):
+    blocked = _ready_or_redirect()
+    if blocked:
+        return blocked
+    if not valid_job_id(job_id):
+        abort(404)
+    manager = _analysis_manager()
+    job = manager.get_job(job_id)
+    if job is None:
+        abort(404)
+    if job["status"] != "complete" or job["result"] is None:
+        return redirect(
+            url_for("analysis_job_page", job_id=job_id),
+            code=303,
+        )
+    if not manager.job_is_current(job):
+        flash(
+            "This cached result is no longer valid because messages.db changed. "
+            "Run the analysis again.",
+            "warning",
+        )
+        return _render_analysis_landing(job["settings"], 409)
+    return render_template(
+        "analysis_result.html",
+        job=job,
+        result=job["result"],
+        settings=AnalysisSettings.from_dict(job["settings"]),
+        cache_hit=request.args.get("cached") == "1",
+        action_token=_analysis_action_token(),
+    )
+
+
+@app.post("/analysis/results/<job_id>/download")
+def download_analysis_report(job_id: str):
+    blocked = _ready_or_redirect()
+    if blocked:
+        return blocked
+    _require_analysis_action_token()
+    if not valid_job_id(job_id):
+        abort(404)
+    manager = _analysis_manager()
+    job = manager.get_job(job_id)
+    if job is None or job["status"] != "complete" or job["result"] is None:
+        abort(404)
+    if not manager.job_is_current(job):
+        flash(
+            "The cached result cannot be downloaded because messages.db changed.",
+            "warning",
+        )
+        return redirect(url_for("analysis_page"), code=303)
+    settings = AnalysisSettings.from_dict(job["settings"])
     output_path = generate_analysis_report(
-        REPORTS_DIR, result, start_date, end_date, top_n
+        REPORTS_DIR,
+        job["result"],
+        settings.start_date,
+        settings.end_date,
+        settings.top_n,
+        full_conversation=settings.full_conversation,
+        calculation_seconds=job["elapsed_seconds"],
+        completed_at=job["completed_at"],
+        from_cache=True,
     )
     return send_file(
         output_path,
@@ -406,6 +620,57 @@ def download_analysis_report():
         download_name=output_path.name,
         mimetype="text/html",
     )
+
+
+@app.post("/analysis/results/<job_id>/recalculate")
+def recalculate_analysis(job_id: str):
+    blocked = _ready_or_redirect()
+    if blocked:
+        return blocked
+    _require_analysis_action_token()
+    if not valid_job_id(job_id):
+        abort(404)
+    manager = _analysis_manager()
+    previous = manager.get_job(job_id)
+    if previous is None or previous["status"] != "complete":
+        abort(404)
+    settings = AnalysisSettings.from_dict(previous["settings"])
+    try:
+        submission = manager.submit(settings, force=True)
+    except (OSError, sqlite3.Error):
+        flash(
+            "Analysis could not restart because the local databases were unavailable.",
+            "error",
+        )
+        return redirect(url_for("analysis_result", job_id=job_id), code=303)
+    if submission["outcome"] == "empty":
+        flash("No messages exist in the saved date range.", "warning")
+        return redirect(url_for("analysis_page"), code=303)
+    if submission["outcome"] == "busy":
+        flash("Another analysis is already running.", "warning")
+    return redirect(
+        url_for(
+            "analysis_job_page",
+            job_id=submission["job"]["job_id"],
+        ),
+        code=303,
+    )
+
+
+@app.post("/analysis/cache/clear")
+def clear_analysis_cache():
+    _require_analysis_action_token()
+    if request.form.get("confirm") != "clear":
+        abort(400)
+    manager = _analysis_manager()
+    if not manager.clear_cache():
+        flash("Stop or finish the current analysis before clearing the cache.", "warning")
+    else:
+        flash(
+            "Analysis cache cleared. Messages, photos, exports, and reports were untouched.",
+            "success",
+        )
+    return redirect(url_for("analysis_page"), code=303)
 
 
 @app.get("/photos/<path:filename>")

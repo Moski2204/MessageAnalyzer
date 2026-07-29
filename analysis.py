@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import heapq
 import re
-import statistics
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 
 DEFAULT_STOP_WORDS = """a about after again all also am an and any are as at be because
@@ -86,21 +86,72 @@ def format_duration(seconds: float | int | None) -> str:
     return f"{seconds / 86400:.1f} days"
 
 
-def _duration_summary(values: list[int]) -> dict[str, Any]:
-    under_24 = [value for value in values if value <= 86400]
+def _counter_median(values: Counter[int]) -> float:
+    count = sum(values.values())
+    if not count:
+        return 0.0
+    lower_position = (count - 1) // 2
+    upper_position = count // 2
+    seen = 0
+    lower_value: int | None = None
+    for value in sorted(values):
+        seen += values[value]
+        if lower_value is None and seen > lower_position:
+            lower_value = value
+        if seen > upper_position:
+            assert lower_value is not None
+            return (lower_value + value) / 2
+    return 0.0
+
+
+def _counter_mean(values: Counter[int]) -> float:
+    count = sum(values.values())
+    return (
+        sum(value * frequency for value, frequency in values.items()) / count
+        if count
+        else 0.0
+    )
+
+
+def _duration_summary(values: Counter[int]) -> dict[str, Any]:
+    count = sum(values.values())
+    under_24_count = sum(
+        frequency for value, frequency in values.items() if value <= 86400
+    )
+    under_24_total = sum(
+        value * frequency
+        for value, frequency in values.items()
+        if value <= 86400
+    )
     return {
-        "count": len(values),
-        "median": format_duration(statistics.median(values)) if values else "—",
-        "average": format_duration(statistics.mean(values)) if values else "—",
-        "average_under_24h": format_duration(statistics.mean(under_24)) if under_24 else "—",
+        "count": count,
+        "median": format_duration(_counter_median(values)) if count else "—",
+        "average": format_duration(_counter_mean(values)) if count else "—",
+        "average_under_24h": format_duration(
+            under_24_total / under_24_count
+        )
+        if under_24_count
+        else "—",
         "fastest": format_duration(min(values)) if values else "—",
         "slowest": format_duration(max(values)) if values else "—",
-        "under_5m": sum(value < 300 for value in values),
-        "under_30m": sum(value < 1800 for value in values),
-        "under_1h": sum(value < 3600 for value in values),
-        "under_6h": sum(value < 21600 for value in values),
-        "under_24h": sum(value < 86400 for value in values),
-        "over_24h": sum(value > 86400 for value in values),
+        "under_5m": sum(
+            frequency for value, frequency in values.items() if value < 300
+        ),
+        "under_30m": sum(
+            frequency for value, frequency in values.items() if value < 1800
+        ),
+        "under_1h": sum(
+            frequency for value, frequency in values.items() if value < 3600
+        ),
+        "under_6h": sum(
+            frequency for value, frequency in values.items() if value < 21600
+        ),
+        "under_24h": sum(
+            frequency for value, frequency in values.items() if value < 86400
+        ),
+        "over_24h": sum(
+            frequency for value, frequency in values.items() if value > 86400
+        ),
     }
 
 
@@ -127,16 +178,16 @@ def _sentiment_rows(counter: Counter[str]) -> list[dict[str, Any]]:
     ]
 
 
-def _median(values: list[int]) -> float:
-    return float(statistics.median(values)) if values else 0.0
-
-
 def analyze_messages(
     connection,
     start_unix: int | None,
     end_unix: int | None,
     stop_words: set[str],
     top_n: int,
+    *,
+    progress_callback: Callable[[str, float, int, int], None] | None = None,
+    chunk_size: int = 5_000,
+    total_messages: int | None = None,
 ) -> dict[str, Any]:
     where = ["1=1"]
     params: list[Any] = []
@@ -148,24 +199,40 @@ def analyze_messages(
         params.append(end_unix)
 
     sql = f"""
-        SELECT sender, timestamp_unix, timestamp, message_text, message_type,
+        SELECT id, sender, timestamp_unix, message_text, message_type,
                sentiment_label, sentiment_score
         FROM messages
         WHERE {' AND '.join(where)}
-        ORDER BY conversation_position ASC
+        ORDER BY timestamp_unix ASC, id ASC
     """
 
+    if total_messages is None:
+        total_messages = int(
+            connection.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM messages
+                WHERE {' AND '.join(where)}
+                """,
+                params,
+            ).fetchone()["count"]
+        )
+    expected_total = total_messages
     total_messages = 0
+    processed_messages = 0
+    chunk_size = max(1, min(int(chunk_size), 50_000))
+    if progress_callback:
+        progress_callback("Loading messages", 0, 0, expected_total)
     sender_counts: Counter[str] = Counter()
     run_counts: Counter[str] = Counter()
-    response_times: dict[str, list[int]] = defaultdict(list)
-    response_by_month: dict[str, list[int]] = defaultdict(list)
+    response_times: dict[str, Counter[int]] = defaultdict(Counter)
+    response_by_month: dict[str, Counter[int]] = defaultdict(Counter)
     gap_resumers = {
         "6 hours": Counter(),
         "24 hours": Counter(),
         "3 days": Counter(),
     }
-    lengths: dict[str, list[int]] = defaultdict(list)
+    lengths: dict[str, Counter[int]] = defaultdict(Counter)
     questions: Counter[str] = Counter()
     overall_words: Counter[str] = Counter()
     sender_words: dict[str, Counter[str]] = defaultdict(Counter)
@@ -184,13 +251,36 @@ def analyze_messages(
     previous_timestamp: int | None = None
     previous_run_last_timestamp: int | None = None
 
-    for row in connection.execute(sql, params):
+    def selected_rows():
+        nonlocal processed_messages
+        cursor = connection.execute(sql, params)
+        while True:
+            chunk = cursor.fetchmany(chunk_size)
+            if not chunk:
+                return
+            yield from chunk
+            processed_messages += len(chunk)
+            if progress_callback:
+                fraction = (
+                    processed_messages / expected_total
+                    if expected_total
+                    else 1.0
+                )
+                progress_callback(
+                    "Calculating response times, words, sentiment, and patterns",
+                    min(80.0, 5.0 + fraction * 75.0),
+                    processed_messages,
+                    expected_total,
+                )
+
+    for row in selected_rows():
         total_messages += 1
         sender = row["sender"]
         timestamp_unix = row["timestamp_unix"]
         text = row["message_text"] or ""
         message_type = row["message_type"]
         sender_counts[sender] += 1
+        month: str | None = None
 
         if timestamp_unix is not None:
             stamp = datetime.fromtimestamp(timestamp_unix, timezone.utc)
@@ -204,7 +294,11 @@ def analyze_messages(
                     gap_resumers["6 hours"][sender] += 1
                 if gap >= 86400:
                     gap_resumers["24 hours"][sender] += 1
-                    inactive_gaps.append((gap, timestamp_unix, sender))
+                    inactive_gap = (gap, timestamp_unix, sender)
+                    if len(inactive_gaps) < 10:
+                        heapq.heappush(inactive_gaps, inactive_gap)
+                    elif inactive_gap > inactive_gaps[0]:
+                        heapq.heapreplace(inactive_gaps, inactive_gap)
                 if gap >= 259200:
                     gap_resumers["3 days"][sender] += 1
             previous_timestamp = timestamp_unix
@@ -218,43 +312,48 @@ def analyze_messages(
                 and timestamp_unix >= previous_run_last_timestamp
             ):
                 response = timestamp_unix - previous_run_last_timestamp
-                response_times[sender].append(response)
-                response_by_month[
-                    datetime.fromtimestamp(timestamp_unix, timezone.utc).strftime("%Y-%m")
-                ].append(response)
+                response_times[sender][response] += 1
+                if month is not None:
+                    response_by_month[month][response] += 1
             previous_sender = sender
         if timestamp_unix is not None:
             previous_run_last_timestamp = timestamp_unix
 
-        if message_type not in {"unavailable", "system"} and not PLACEHOLDER_RE.fullmatch(text):
-            lengths[sender].append(len(text))
+        if (
+            message_type not in {"unavailable", "system"}
+            and not PLACEHOLDER_RE.fullmatch(text)
+        ):
+            lengths[sender][len(text)] += 1
             if "?" in text:
                 questions[sender] += 1
             clean_text = URL_RE.sub(" ", text)
-            words = [
-                word.casefold().replace("’", "'")
-                for word in WORD_RE.findall(clean_text)
-                if word.casefold() not in stop_words
-            ]
+            words = []
+            for word in WORD_RE.findall(clean_text):
+                normalized_word = word.casefold().replace("’", "'")
+                if normalized_word not in stop_words:
+                    words.append(normalized_word)
             overall_words.update(words)
             sender_words[sender].update(words)
             word_totals["overall"] += len(words)
             word_totals[sender] += len(words)
 
         label = row["sentiment_label"]
-        if label:
+        if label in {"positive", "neutral", "negative"}:
             sentiment_overall[label] += 1
             sentiment_by_sender[sender][label] += 1
             score = row["sentiment_score"]
             if score is not None:
-                sentiment_score_sums["overall"] += float(score)
-                sentiment_score_sums[sender] += float(score)
-                sentiment_score_counts["overall"] += 1
-                sentiment_score_counts[sender] += 1
-            if timestamp_unix is not None:
-                sentiment_by_month[
-                    datetime.fromtimestamp(timestamp_unix, timezone.utc).strftime("%Y-%m")
-                ][label] += 1
+                try:
+                    numeric_score = float(score)
+                except (TypeError, ValueError, OverflowError):
+                    numeric_score = None
+                if numeric_score is not None:
+                    sentiment_score_sums["overall"] += numeric_score
+                    sentiment_score_sums[sender] += numeric_score
+                    sentiment_score_counts["overall"] += 1
+                    sentiment_score_counts[sender] += 1
+            if month is not None:
+                sentiment_by_month[month][label] += 1
         else:
             skipped_sentiment += 1
 
@@ -262,6 +361,13 @@ def analyze_messages(
     total_runs = sum(run_counts.values())
     analyzed_sentiment = sum(sentiment_overall.values())
 
+    if progress_callback:
+        progress_callback(
+            "Calculating response times",
+            84,
+            total_messages,
+            total_messages,
+        )
     sender_activity = [
         {
             "sender": sender,
@@ -278,6 +384,13 @@ def analyze_messages(
         {"sender": sender, **_duration_summary(response_times[sender])}
         for sender in senders
     ]
+    if progress_callback:
+        progress_callback(
+            "Counting frequent words",
+            88,
+            total_messages,
+            total_messages,
+        )
     sender_word_groups = [
         {
             "sender": sender,
@@ -286,6 +399,13 @@ def analyze_messages(
         }
         for sender in senders
     ]
+    if progress_callback:
+        progress_callback(
+            "Calculating sentiment",
+            92,
+            total_messages,
+            total_messages,
+        )
     sender_sentiment = [
         {
             "sender": sender,
@@ -296,11 +416,18 @@ def analyze_messages(
         }
         for sender in senders
     ]
+    if progress_callback:
+        progress_callback(
+            "Building conversation patterns",
+            96,
+            total_messages,
+            total_messages,
+        )
     length_rows = [
         {
             "sender": sender,
-            "average": statistics.mean(lengths[sender]) if lengths[sender] else 0,
-            "median": _median(lengths[sender]),
+            "average": _counter_mean(lengths[sender]),
+            "median": _counter_median(lengths[sender]),
             "questions": questions[sender],
             "question_ratio": questions[sender] / sender_counts[sender] * 100
             if sender_counts[sender]
@@ -332,7 +459,9 @@ def analyze_messages(
                 "negative_percentage": labels["negative"] / sum(labels.values()) * 100
                 if labels
                 else 0,
-                "median_response": format_duration(statistics.median(response_values))
+                "median_response": format_duration(
+                    _counter_median(response_values)
+                )
                 if response_values
                 else "—",
             }
@@ -349,7 +478,7 @@ def analyze_messages(
             "by_sender": sender_word_groups,
         },
         "sentiment": {
-            "method": LocalSentiment().method,
+            "method": "Stored local sentiment scores (VADER/fallback)",
             "analyzed": analyzed_sentiment,
             "skipped": skipped_sentiment,
             "overall": _sentiment_rows(sentiment_overall),

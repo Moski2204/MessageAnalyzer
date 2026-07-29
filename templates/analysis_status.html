@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Analysis Progress{% endblock %}
+{% block content %}
+  <section class="page-heading compact">
+    <p class="eyebrow">Background analysis</p>
+    <h1>Analysis Progress</h1>
+    <p>You may leave this page and return later. The local worker will continue while the application remains open.</p>
+  </section>
+
+  <section
+    class="panel analysis-progress"
+    id="analysis-progress"
+    data-status-url="{{ status_url }}"
+  >
+    <div class="progress-heading">
+      <div>
+        <span class="status-label">Current status</span>
+        <strong id="analysis-status">{{ job.status|capitalize }}</strong>
+      </div>
+      <strong id="analysis-percentage">{{ "%.1f"|format(job.progress or 0) }}%</strong>
+    </div>
+    <progress id="analysis-progress-bar" max="100" value="{{ job.progress or 0 }}"></progress>
+    <dl class="progress-details">
+      <div><dt>Current stage</dt><dd id="analysis-stage">{{ job.stage }}</dd></div>
+      <div><dt>Messages processed</dt><dd id="analysis-count">{{ "{:,}".format(job.processed_messages) }} of {{ "{:,}".format(job.total_messages) }}</dd></div>
+      <div><dt>Elapsed time</dt><dd id="analysis-elapsed">{{ "%.1f"|format(job.elapsed_seconds) }} seconds</dd></div>
+    </dl>
+    <div class="notice error hidden" id="analysis-error" role="alert"></div>
+    <div class="actions">
+      <a class="button secondary" href="{{ url_for('analysis_page') }}">Back to Analysis</a>
+    </div>
+  </section>
+{% endblock %}
+{% block scripts %}
+  <script src="{{ url_for('static', filename='analysis_status.js') }}"></script>
+{% endblock %}

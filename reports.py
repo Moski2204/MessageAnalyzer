@@ -105,6 +105,11 @@ def generate_analysis_report(
     start_date: str,
     end_date: str,
     top_n: int,
+    *,
+    full_conversation: bool = False,
+    calculation_seconds: float | None = None,
+    completed_at: str | None = None,
+    from_cache: bool = False,
 ) -> Path:
     reports_dir.mkdir(parents=True, exist_ok=True)
     output_path = reports_dir / _filename("analysis_report")
@@ -115,9 +120,16 @@ def generate_analysis_report(
         output.write(
             '<section class="meta">'
             f"<div><strong>Generated:</strong> {_safe(generated)}</div>"
-            f"<div><strong>Date range:</strong> {_safe(start_date or 'Beginning')} "
-            f"to {_safe(end_date or 'End')}</div>"
-            f"<div><strong>Total messages:</strong> {result['total_messages']}</div>"
+            f"<div><strong>Date range:</strong> "
+            f"{'Full Conversation' if full_conversation else _safe(start_date) + ' to ' + _safe(end_date)}</div>"
+            f"<div><strong>Total messages:</strong> "
+            f"{_safe(result['total_messages'])}</div>"
+            f"<div><strong>Calculation time:</strong> "
+            f"{_safe(f'{calculation_seconds:.1f} seconds' if calculation_seconds is not None else 'Not recorded')}</div>"
+            f"<div><strong>Completed:</strong> "
+            f"{_safe(completed_at or 'Not recorded')}</div>"
+            f"<div><strong>Loaded from analysis cache:</strong> "
+            f"{'Yes' if from_cache else 'No'}</div>"
             f"<div><strong>Sentiment method:</strong> "
             f"{_safe(result['sentiment']['method'])}</div></section>"
         )
@@ -185,8 +197,8 @@ def generate_analysis_report(
 
         output.write("<h2>Approximate sentiment</h2>")
         output.write(
-            f"<p>{result['sentiment']['analyzed']} messages analysed; "
-            f"{result['sentiment']['skipped']} skipped.</p>"
+            f"<p>{_safe(result['sentiment']['analyzed'])} messages analysed; "
+            f"{_safe(result['sentiment']['skipped'])} skipped.</p>"
         )
         output.write(
             _table(
