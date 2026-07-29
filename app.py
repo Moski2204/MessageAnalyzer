@@ -203,7 +203,71 @@ def _highlight(text: str, query: str, mode: str) -> Markup:
     return Markup("").join(pieces)
 
 
+def _display_datetime(value: Any) -> str:
+    """Format an imported SQLite timestamp for compact human-readable display."""
+    if value is None:
+        return "Unknown"
+    raw_value = str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(raw_value)
+    except ValueError:
+        return raw_value
+    hour = parsed.strftime("%I").lstrip("0") or "0"
+    return (
+        f"{parsed.strftime('%B')} {parsed.day}, {parsed.year} "
+        f"at {hour}:{parsed.strftime('%M %p')}"
+    )
+
+
 app.jinja_env.filters["highlight"] = _highlight
+app.jinja_env.filters["display_datetime"] = _display_datetime
+
+
+@app.errorhandler(400)
+def bad_request_page(_error):
+    return (
+        render_template(
+            "error.html",
+            status_code=400,
+            title="This request could not be completed",
+            message=(
+                "Check the selected options and try again. No local data was changed."
+            ),
+        ),
+        400,
+    )
+
+
+@app.errorhandler(404)
+def not_found_page(_error):
+    return (
+        render_template(
+            "error.html",
+            status_code=404,
+            title="Page or report not found",
+            message=(
+                "The requested page may no longer exist, or the saved result is "
+                "not available."
+            ),
+        ),
+        404,
+    )
+
+
+@app.errorhandler(500)
+def application_error_page(_error):
+    return (
+        render_template(
+            "error.html",
+            status_code=500,
+            title="The application could not finish that request",
+            message=(
+                "Return to the homepage and try again. Your local messages and "
+                "photos were not changed."
+            ),
+        ),
+        500,
+    )
 
 
 @app.route("/")

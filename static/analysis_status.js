@@ -12,8 +12,32 @@
   const count = document.getElementById("analysis-count");
   const elapsed = document.getElementById("analysis-elapsed");
   const error = document.getElementById("analysis-error");
+  const completion = document.getElementById("analysis-complete");
+  const resultLink = document.getElementById("analysis-result-link");
   const number = new Intl.NumberFormat();
-  let stopped = false;
+  let stopped = panel.dataset.jobStatus === "failed"
+    || panel.dataset.jobStatus === "interrupted";
+
+  const localResultUrl = (value) => {
+    if (typeof value !== "string" || !value) return null;
+    try {
+      const candidate = new URL(value, window.location.href);
+      return candidate.origin === window.location.origin ? candidate : null;
+    } catch (_error) {
+      return null;
+    }
+  };
+
+  const showError = (message) => {
+    stopped = true;
+    error.textContent = message || "Analysis stopped before completion.";
+    error.classList.remove("hidden");
+  };
+
+  const updateText = (element, value) => {
+    const nextValue = String(value ?? "");
+    if (element.textContent !== nextValue) element.textContent = nextValue;
+  };
 
   const poll = async () => {
     if (stopped) return;
@@ -22,39 +46,57 @@
         cache: "no-store",
         headers: { Accept: "application/json" },
       });
+      if (response.status === 400 || response.status === 404) {
+        showError(
+          "This analysis job is no longer available. Return to Analysis to start or open another analysis."
+        );
+        return;
+      }
       if (!response.ok) throw new Error("status unavailable");
       const job = await response.json();
+      const jobStatus = typeof job.status === "string" ? job.status : "unknown";
 
-      status.textContent = job.status.charAt(0).toUpperCase() + job.status.slice(1);
-      stage.textContent = job.stage;
-      count.textContent = `${number.format(job.processed_messages)} of ${number.format(job.total_messages)}`;
-      elapsed.textContent = `${Number(job.elapsed_seconds).toFixed(1)} seconds`;
+      panel.dataset.jobStatus = jobStatus;
+      updateText(status, jobStatus === "queued"
+        ? "Waiting"
+        : jobStatus.charAt(0).toUpperCase() + jobStatus.slice(1));
+      updateText(stage, job.stage);
+      updateText(count, `${number.format(job.processed_messages)} of ${number.format(job.total_messages)}`);
+      updateText(elapsed, `${Number(job.elapsed_seconds).toFixed(1)} seconds`);
 
       if (job.percentage === null) {
         progress.removeAttribute("value");
-        percentage.textContent = "Working";
+        updateText(percentage, "Working");
       } else {
         const value = Math.max(0, Math.min(100, Number(job.percentage)));
         progress.value = value;
-        percentage.textContent = `${value.toFixed(1)}%`;
+        updateText(percentage, `${value.toFixed(1)}%`);
       }
 
-      if (job.status === "complete" && job.result_url) {
+      if (jobStatus === "complete") {
+        const destination = localResultUrl(job.result_url);
         stopped = true;
-        window.location.replace(job.result_url);
+        if (!destination) {
+          showError("Analysis completed, but the local result link was unavailable.");
+          return;
+        }
+        resultLink.href = destination.href;
+        completion.classList.remove("hidden");
+        completion.setAttribute("aria-hidden", "false");
+        window.setTimeout(() => {
+          window.location.replace(destination.href);
+        }, 800);
         return;
       }
-      if (job.status === "failed" || job.status === "interrupted") {
-        stopped = true;
-        error.textContent = job.error || "Analysis stopped before completion.";
-        error.classList.remove("hidden");
+      if (jobStatus === "failed" || jobStatus === "interrupted") {
+        showError(job.error);
         return;
       }
     } catch (_error) {
-      stage.textContent = "Waiting for the local application";
+      updateText(stage, "Waiting for the local application");
     }
     window.setTimeout(poll, 1500);
   };
 
-  window.setTimeout(poll, 500);
+  if (!stopped) window.setTimeout(poll, 500);
 })();

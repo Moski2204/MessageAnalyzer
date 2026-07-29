@@ -6,27 +6,55 @@
   <title>{% block title %}Instagram Message Analyzer{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
+  <a class="skip-link" href="#main-content">Skip to content</a>
   <header class="site-header">
     <div class="shell header-inner">
-      <a class="brand" href="{{ url_for('index') }}">Message Analyzer</a>
-      <nav aria-label="Main navigation">
-        <a href="{{ url_for('index') }}">Home</a>
-        <a href="{{ url_for('search') }}">Search Conversation</a>
-        <a href="{{ url_for('conversation') }}">Full Conversation</a>
-        <a href="{{ url_for('analysis_page') }}">Analysis</a>
+      <a class="brand" href="{{ url_for('index') }}" aria-label="Message Analyzer home">
+        <span class="brand-mark" aria-hidden="true">M</span>
+        <span>Message Analyzer</span>
+      </a>
+      <nav class="main-nav" aria-label="Main navigation">
+        <a
+          class="nav-link{% if request.endpoint == 'index' %} is-active{% endif %}"
+          href="{{ url_for('index') }}"
+          {% if request.endpoint == 'index' %}aria-current="page"{% endif %}
+        >Home</a>
+        <a
+          class="nav-link{% if request.endpoint in ['search', 'search_report', 'download_search_report'] %} is-active{% endif %}"
+          href="{{ url_for('search') }}"
+          {% if request.endpoint in ['search', 'search_report', 'download_search_report'] %}aria-current="page"{% endif %}
+        >Search</a>
+        <a
+          class="nav-link{% if request.endpoint == 'conversation' %} is-active{% endif %}"
+          href="{{ url_for('conversation') }}"
+          {% if request.endpoint == 'conversation' %}aria-current="page"{% endif %}
+        >Conversation</a>
+        <a
+          class="nav-link{% if request.endpoint in ['analysis_page', 'start_analysis', 'analysis_job_page', 'analysis_job_status', 'analysis_result', 'download_analysis_report', 'recalculate_analysis', 'clear_analysis_cache'] %} is-active{% endif %}"
+          href="{{ url_for('analysis_page') }}"
+          {% if request.endpoint in ['analysis_page', 'start_analysis', 'analysis_job_page', 'analysis_job_status', 'analysis_result', 'download_analysis_report', 'recalculate_analysis', 'clear_analysis_cache'] %}aria-current="page"{% endif %}
+        >Analysis</a>
       </nav>
     </div>
   </header>
-  <main class="shell">
+  <main class="shell page-shell" id="main-content" tabindex="-1">
     {% with messages = get_flashed_messages(with_categories=true) %}
-      {% for category, message in messages %}
-        <div class="flash {{ category }}">{{ message }}</div>
-      {% endfor %}
+      {% if messages %}
+        <div class="flash-stack" aria-label="Notifications">
+          {% for category, message in messages %}
+            <div class="flash {{ category }}" role="{% if category == 'error' %}alert{% else %}status{% endif %}">
+              <span class="flash-indicator" aria-hidden="true"></span>
+              <span>{{ message }}</span>
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
     {% endwith %}
     {% block content %}{% endblock %}
   </main>
   <footer class="shell footer">
+    <span class="privacy-dot" aria-hidden="true"></span>
     Private local app · No uploads, analytics, external scripts, or tracking
   </footer>
   {% block scripts %}{% endblock %}

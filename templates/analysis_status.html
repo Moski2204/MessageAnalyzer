@@ -1,31 +1,70 @@
 {% extends "base.html" %}
 {% block title %}Analysis Progress{% endblock %}
+{% block body_class %}analysis-status-page{% endblock %}
 {% block content %}
   <section class="page-heading compact">
     <p class="eyebrow">Background analysis</p>
     <h1>Analysis Progress</h1>
-    <p>You may leave this page and return later. The local worker will continue while the application remains open.</p>
+    <p>Track the local background worker while it builds your analysis.</p>
   </section>
 
   <section
     class="panel analysis-progress"
     id="analysis-progress"
     data-status-url="{{ status_url }}"
+    data-job-status="{{ job.status }}"
+    aria-labelledby="analysis-progress-heading"
   >
     <div class="progress-heading">
       <div>
         <span class="status-label">Current status</span>
-        <strong id="analysis-status">{{ job.status|capitalize }}</strong>
+        <h2 id="analysis-progress-heading" aria-live="polite" aria-atomic="true">
+          <span id="analysis-status">{{ "Waiting" if job.status == "queued" else job.status|capitalize }}</span>
+        </h2>
       </div>
       <strong id="analysis-percentage">{{ "%.1f"|format(job.progress or 0) }}%</strong>
     </div>
-    <progress id="analysis-progress-bar" max="100" value="{{ job.progress or 0 }}"></progress>
+
+    <progress
+      id="analysis-progress-bar"
+      max="100"
+      value="{{ job.progress or 0 }}"
+      aria-label="Analysis completion"
+    ></progress>
+
     <dl class="progress-details">
-      <div><dt>Current stage</dt><dd id="analysis-stage">{{ job.stage }}</dd></div>
-      <div><dt>Messages processed</dt><dd id="analysis-count">{{ "{:,}".format(job.processed_messages) }} of {{ "{:,}".format(job.total_messages) }}</dd></div>
-      <div><dt>Elapsed time</dt><dd id="analysis-elapsed">{{ "%.1f"|format(job.elapsed_seconds) }} seconds</dd></div>
+      <div>
+        <dt>Current stage</dt>
+        <dd id="analysis-stage" aria-live="polite" aria-atomic="true">{{ job.stage }}</dd>
+      </div>
+      <div>
+        <dt>Messages processed</dt>
+        <dd id="analysis-count">{{ "{:,}".format(job.processed_messages) }} of {{ "{:,}".format(job.total_messages) }}</dd>
+      </div>
+      <div>
+        <dt>Elapsed time</dt>
+        <dd id="analysis-elapsed">{{ "%.1f"|format(job.elapsed_seconds) }} seconds</dd>
+      </div>
     </dl>
-    <div class="notice error hidden" id="analysis-error" role="alert"></div>
+
+    <div class="notice hidden" id="analysis-complete" role="status" aria-live="polite" aria-hidden="true">
+      <strong>Analysis complete.</strong>
+      <span>Your results are ready.</span>
+      <a class="button primary" id="analysis-result-link" href="{{ url_for('analysis_job_page', job_id=job.job_id) }}">View Analysis Results</a>
+    </div>
+
+    <div
+      class="notice error{% if job.status not in ['failed', 'interrupted'] %} hidden{% endif %}"
+      id="analysis-error"
+      role="alert"
+      aria-live="assertive"
+    >{% if job.status in ['failed', 'interrupted'] %}{{ job.error or "Analysis stopped before completion." }}{% endif %}</div>
+
+    <div class="analysis-info">
+      <span aria-hidden="true">i</span>
+      <span>Keep this app and terminal open while the analysis runs. You may leave this page and return later.</span>
+    </div>
+    <p class="section-note">This page checks the local worker every few seconds. No private message text is returned by the status check.</p>
     <div class="actions">
       <a class="button secondary" href="{{ url_for('analysis_page') }}">Back to Analysis</a>
     </div>

@@ -1,40 +1,92 @@
 {% extends "base.html" %}
 {% block title %}Home · Instagram Message Analyzer{% endblock %}
+{% block body_class %}home-page{% endblock %}
 {% block content %}
-  <section class="page-heading">
-    <p class="eyebrow">Local conversation workspace</p>
-    <h1>Instagram Message Analyzer</h1>
-    <p>Search, browse, and measure one conversation. Everything stays on this computer.</p>
+  <section class="page-heading dashboard-heading">
+    <div>
+      <p class="eyebrow">Conversation workspace</p>
+      <h1>Instagram Message Analyzer</h1>
+      <p>Search, browse, and analyse your private conversation locally.</p>
+    </div>
+    <span class="privacy-badge"><span aria-hidden="true"></span>Local only</span>
   </section>
 
   {% if summary %}
-    <section class="stats-grid" aria-label="Database status">
-      <article class="stat"><span>Status</span><strong>Available</strong></article>
-      {% if summary.files_processed is defined and summary.files_found is defined %}
-        <article class="stat"><span>HTML files</span><strong>{{ summary.files_processed }} / {{ summary.files_found }}</strong></article>
-      {% endif %}
-      <article class="stat"><span>Messages</span><strong>{{ "{:,}".format(summary.message_count) }}</strong></article>
-      {% if summary.duplicates_skipped is defined %}
-        <article class="stat"><span>Duplicates skipped</span><strong>{{ "{:,}".format(summary.duplicates_skipped) }}</strong></article>
-      {% endif %}
-      {% if summary.messages_skipped_other_senders is defined %}
-        <article class="stat"><span>Other senders excluded</span><strong>{{ "{:,}".format(summary.messages_skipped_other_senders or 0) }}</strong></article>
-      {% endif %}
-      <article class="stat"><span>Oldest</span><strong>{{ summary.oldest_timestamp or "Unknown" }}</strong></article>
-      <article class="stat"><span>Newest</span><strong>{{ summary.newest_timestamp or "Unknown" }}</strong></article>
+    <section class="dashboard-section" aria-labelledby="database-summary-title">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Current data</p>
+          <h2 id="database-summary-title">Database Summary</h2>
+        </div>
+        <span class="status-chip is-success"><span aria-hidden="true"></span>Available</span>
+      </div>
+      <div class="home-summary-grid">
+        <article class="stat summary-stat">
+          <span class="stat-label">Status</span>
+          <strong>Ready</strong>
+          <small>Local database connected</small>
+        </article>
+        {% if summary.files_processed is defined and summary.files_found is defined %}
+          <article class="stat summary-stat">
+            <span class="stat-label">HTML files</span>
+            <strong>{{ summary.files_processed }} / {{ summary.files_found }}</strong>
+            <small>Processed locally</small>
+          </article>
+        {% endif %}
+        <article class="stat summary-stat">
+          <span class="stat-label">Messages</span>
+          <strong>{{ "{:,}".format(summary.message_count) }}</strong>
+          <small>Available to search</small>
+        </article>
+        {% if summary.duplicates_skipped is defined %}
+          <article class="stat summary-stat">
+            <span class="stat-label">Duplicates skipped</span>
+            <strong>{{ "{:,}".format(summary.duplicates_skipped) }}</strong>
+            <small>Excluded during import</small>
+          </article>
+        {% endif %}
+        {% if summary.messages_skipped_other_senders is defined %}
+          <article class="stat summary-stat">
+            <span class="stat-label">Other senders excluded</span>
+            <strong>{{ "{:,}".format(summary.messages_skipped_other_senders or 0) }}</strong>
+            <small>Conversation kept focused</small>
+          </article>
+        {% endif %}
+        <article class="stat summary-stat date-range-stat">
+          <span class="stat-label">Conversation date range</span>
+          <dl>
+            <div><dt>Oldest</dt><dd>{{ summary.oldest_timestamp|display_datetime }}</dd></div>
+            <div><dt>Newest</dt><dd>{{ summary.newest_timestamp|display_datetime }}</dd></div>
+          </dl>
+        </article>
+      </div>
     </section>
   {% else %}
-    <div class="notice error">
-      <strong>Database unavailable.</strong>
-      {{ database_unavailable_message }}
-    </div>
+    <section class="empty-state error-state" role="alert">
+      <span class="state-icon" aria-hidden="true">!</span>
+      <div>
+        <h2>Database unavailable.</h2>
+        <p>{{ database_unavailable_message }}</p>
+      </div>
+    </section>
   {% endif %}
 
-  <section class="actions">
-    <a class="button secondary" href="{{ url_for('search') }}">Search Conversation</a>
-    <a class="button secondary" href="{{ url_for('conversation') }}">View Full Conversation</a>
-    <a class="button secondary" href="{{ url_for('analysis_page') }}">View Analysis</a>
+  <section class="dashboard-section quick-actions-section actions" aria-labelledby="quick-actions-title">
+    <div class="section-heading compact-section-heading">
+      <div>
+        <p class="section-kicker">Get started</p>
+        <h2 id="quick-actions-title">Quick Actions</h2>
+      </div>
+    </div>
+    <div class="home-actions">
+      <a class="button action-card is-primary" data-index="01" href="{{ url_for('search') }}">Search Conversation</a>
+      <a class="button action-card" data-index="02" href="{{ url_for('conversation') }}">View Full Conversation</a>
+      <a class="button action-card" data-index="03" href="{{ url_for('analysis_page') }}">View Analysis</a>
+    </div>
   </section>
 
-  <p class="privacy-note">The local database and original files in <code>data/</code> stay on this computer.</p>
+  <div class="local-note">
+    <span class="local-note-mark" aria-hidden="true"></span>
+    <p><strong>Your data stays here.</strong> The local database and original files in <code>data/</code> never leave this computer.</p>
+  </div>
 {% endblock %}

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · Message Analyzer{% endblock %}
+{% block body_class %}error-page{% endblock %}
+{% block content %}
+  <section class="empty-state error-page-state" role="{% if status_code >= 500 %}alert{% else %}status{% endif %}">
+    <span class="state-code" aria-hidden="true">{{ status_code }}</span>
+    <div>
+      <p class="eyebrow">Unable to open this page</p>
+      <h1>{{ title }}</h1>
+      <p>{{ message }}</p>
+      <div class="actions">
+        <a class="button primary" href="{{ url_for('index') }}">Return Home</a>
+        <a class="button secondary" href="{{ url_for('search') }}">Open Search</a>
+      </div>
+    </div>
+  </section>
+{% endblock %}

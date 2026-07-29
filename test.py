@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sqlite3
 import tempfile
 import threading
@@ -11,6 +12,7 @@ from contextlib import closing, redirect_stdout
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -1269,6 +1271,360 @@ class MessageAnalyzerTests(unittest.TestCase):
         self.assertIn("/photos/page-00.jpg", first_page)
         self.assertNotIn("/photos/page-50.jpg", first_page)
         self.assertIn("/photos/page-50.jpg", second_page)
+
+    def test_frontend_navigation_forms_senders_and_conversation_hooks(self):
+        import app as app_module
+
+        allowed_rows = []
+        for row in standard_rows():
+            allowed = dict(row)
+            allowed["sender"] = "Mahrus" if row["sender"] == "A" else "🐧"
+            allowed_rows.append(allowed)
+        seed_database(self.database, allowed_rows)
+        with connect_readonly(self.database) as connection:
+            target = connection.execute(
+                """
+                SELECT id
+                FROM messages
+                WHERE sender = ? AND message_text = ?
+                """,
+                ("Mahrus", "First message"),
+            ).fetchone()["id"]
+
+        with (
+            patch.object(app_module, "DATA_DIR", self.data),
+            patch.object(app_module, "DATABASE_PATH", self.database),
+            patch.object(app_module, "ANALYSIS_CACHE_PATH", self.analysis_cache),
+            patch.object(app_module, "REPORTS_DIR", self.reports),
+        ):
+            app_module.app.config["TESTING"] = True
+            client = app_module.app.test_client()
+            responses = {
+                "Home": client.get("/"),
+                "Search": client.get("/search"),
+                "Search report": client.get(
+                    "/search/report?q=First+message&mode=phrase&per_page=25"
+                ),
+                "Conversation": client.get(
+                    f"/conversation?target={target}&direction=asc&per_page=50"
+                ),
+                "Analysis": client.get("/analysis"),
+            }
+            self.assertTrue(
+                all(response.status_code == 200 for response in responses.values())
+            )
+            soups = {
+                name: BeautifulSoup(response.get_data(as_text=True), "html.parser")
+                for name, response in responses.items()
+            }
+
+            expected_navigation = [
+                ("Home", "/"),
+                ("Search", "/search"),
+                ("Conversation", "/conversation"),
+                ("Analysis", "/analysis"),
+            ]
+            expected_active = {
+                "Home": "Home",
+                "Search": "Search",
+                "Search report": "Search",
+                "Conversation": "Conversation",
+                "Analysis": "Analysis",
+            }
+            for page_name, soup in soups.items():
+                with self.subTest(page=page_name, contract="navigation"):
+                    navigation = soup.select_one("nav[aria-label='Main navigation']")
+                    self.assertIsNotNone(navigation)
+                    links = navigation.select("a.nav-link")
+                    self.assertEqual(
+                        [
+                            (link.get_text(" ", strip=True), link.get("href"))
+                            for link in links
+                        ],
+                        expected_navigation,
+                    )
+                    active = navigation.select("a[aria-current='page']")
+                    self.assertEqual(len(active), 1)
+                    self.assertEqual(
+                        active[0].get_text(" ", strip=True),
+                        expected_active[page_name],
+                    )
+                    self.assertIn("is-active", active[0].get("class", []))
+
+            def assert_form_contract(
+                soup,
+                selector: str,
+                action: str,
+                method: str,
+                field_names: set[str],
+            ) -> None:
+                form = soup.select_one(selector)
+                self.assertIsNotNone(form)
+                self.assertEqual(form.get("action"), action)
+                self.assertEqual(form.get("method", "get").casefold(), method)
+                actual_names = [
+                    control.get("name")
+                    for control in form.select("[name]")
+                    if control.get("name")
+                ]
+                self.assertEqual(len(actual_names), len(field_names))
+                self.assertEqual(
+                    set(actual_names),
+                    field_names,
+                )
+
+            assert_form_contract(
+                soups["Search"],
+                "form.search-workspace",
+                "/search/report",
+                "get",
+                {
+                    "q",
+                    "mode",
+                    "sender",
+                    "start_date",
+                    "end_date",
+                    "direction",
+                    "per_page",
+                },
+            )
+            assert_form_contract(
+                soups["Conversation"],
+                "form.conversation-filters",
+                "/conversation",
+                "get",
+                {"direction", "sender", "per_page"},
+            )
+            assert_form_contract(
+                soups["Analysis"],
+                "form[action='/analysis/start']",
+                "/analysis/start",
+                "post",
+                {
+                    "action_token",
+                    "start_date",
+                    "end_date",
+                    "top_n",
+                    "full_conversation",
+                    "stop_words",
+                },
+            )
+            assert_form_contract(
+                soups["Analysis"],
+                "form[action='/analysis/cache/clear']",
+                "/analysis/cache/clear",
+                "post",
+                {"action_token", "confirm"},
+            )
+
+            for page_name, soup in soups.items():
+                with self.subTest(page=page_name, contract="removed-context"):
+                    self.assertFalse(soup.select("[name='context'], #context"))
+                    self.assertNotIn(
+                        "context",
+                        {
+                            label.get_text(" ", strip=True).casefold()
+                            for label in soup.select("label")
+                        },
+                    )
+
+            for page_name in ("Search", "Conversation"):
+                with self.subTest(page=page_name, contract="senders"):
+                    options = soups[page_name].select(
+                        "select[name='sender'] > option"
+                    )
+                    self.assertEqual(
+                        [option.get("value") for option in options],
+                        ["", "Mahrus", "🐧"],
+                    )
+                    self.assertEqual(
+                        [option.get_text(" ", strip=True) for option in options],
+                        ["All senders", "Mahrus", "🐧"],
+                    )
+
+            search_report = soups["Search report"]
+            self.assertIn(
+                "Sort: Oldest first",
+                search_report.select_one(".filter-summary").get_text(
+                    " ", strip=True
+                ),
+            )
+            current_sort = search_report.select(
+                ".search-report-actions [aria-current='true']"
+            )
+            self.assertEqual(len(current_sort), 1)
+            self.assertEqual(
+                current_sort[0].get_text(" ", strip=True), "Oldest First"
+            )
+
+            conversation = soups["Conversation"]
+            right_rows = conversation.select(".conversation-row-right")
+            left_rows = conversation.select(".conversation-row-left")
+            self.assertTrue(right_rows)
+            self.assertTrue(left_rows)
+            for row in right_rows:
+                bubble = row.select_one("article.conversation-bubble-right")
+                self.assertIsNotNone(bubble)
+                self.assertEqual(
+                    bubble.select_one("header strong").get_text(strip=True),
+                    "Mahrus",
+                )
+            for row in left_rows:
+                bubble = row.select_one("article.conversation-bubble-left")
+                self.assertIsNotNone(bubble)
+                self.assertEqual(
+                    bubble.select_one("header strong").get_text(strip=True),
+                    "🐧",
+                )
+
+            selected = conversation.select_one(f"article#message-{target}")
+            self.assertIsNotNone(selected)
+            self.assertIn("selected", selected.get("class", []))
+            self.assertIsNotNone(selected.select_one(".selected-message-badge"))
+            deep_link = soups["Search report"].select_one(
+                ".message-source-footer a[href^='/conversation?target=']"
+            )
+            self.assertIsNotNone(deep_link)
+            deep_link_url = urlsplit(deep_link.get("href"))
+            self.assertEqual(deep_link_url.path, "/conversation")
+            self.assertEqual(
+                parse_qs(deep_link_url.query),
+                {"target": [str(target)], "direction": ["asc"]},
+            )
+            self.assertEqual(deep_link_url.fragment, f"message-{target}")
+
+    def test_frontend_local_assets_custom_404_and_desktop_css_contracts(self):
+        import app as app_module
+
+        seed_database(self.database, standard_rows())
+        with (
+            patch.object(app_module, "DATABASE_PATH", self.database),
+            patch.object(app_module, "ANALYSIS_CACHE_PATH", self.analysis_cache),
+        ):
+            app_module.app.config["TESTING"] = True
+            client = app_module.app.test_client()
+            manager = app_module._analysis_manager()
+            settings = AnalysisSettings("", "", True, 20, "the and")
+            fingerprint = source_database_fingerprint(self.database)
+            queued_id = "f" * 32
+            manager.cache.create_job(
+                queued_id,
+                build_cache_key(settings, fingerprint),
+                settings,
+                fingerprint,
+                len(standard_rows()),
+            )
+
+            responses = [
+                client.get("/"),
+                client.get("/search"),
+                client.get("/conversation?direction=asc&per_page=50"),
+                client.get("/analysis"),
+                client.get(f"/analysis/jobs/{queued_id}"),
+            ]
+            self.assertTrue(all(response.status_code == 200 for response in responses))
+            rendered_pages = [
+                BeautifulSoup(response.get_data(as_text=True), "html.parser")
+                for response in responses
+            ]
+            for soup in rendered_pages:
+                with self.subTest(title=soup.title.get_text(" ", strip=True)):
+                    stylesheets = [
+                        link.get("href")
+                        for link in soup.select("link[rel~='stylesheet']")
+                    ]
+                    self.assertEqual(stylesheets, ["/static/styles.css"])
+                    for source in [
+                        script.get("src")
+                        for script in soup.select("script[src]")
+                    ]:
+                        parsed_source = urlsplit(source)
+                        self.assertFalse(parsed_source.scheme)
+                        self.assertFalse(parsed_source.netloc)
+                        self.assertTrue(parsed_source.path.startswith("/static/"))
+                    self.assertNotIn(
+                        "/static/hot_reload.js",
+                        [
+                            script.get("src")
+                            for script in soup.select("script[src]")
+                        ],
+                    )
+
+            progress = rendered_pages[-1]
+            progress_panel = progress.select_one("#analysis-progress")
+            self.assertFalse(progress_panel.has_attr("aria-busy"))
+            self.assertFalse(
+                progress.select_one(".progress-details").has_attr("aria-live")
+            )
+            self.assertEqual(
+                progress.select_one("#analysis-stage").get("aria-live"),
+                "polite",
+            )
+            self.assertEqual(
+                [
+                    script.get("src")
+                    for script in progress.select("script[src]")
+                ],
+                ["/static/analysis_status.js"],
+            )
+            active = progress.select(
+                "nav[aria-label='Main navigation'] a[aria-current='page']"
+            )
+            self.assertEqual(len(active), 1)
+            self.assertEqual(active[0].get_text(" ", strip=True), "Analysis")
+
+            missing = client.get("/this-route-does-not-exist")
+            self.assertEqual(missing.status_code, 404)
+            missing_page = BeautifulSoup(
+                missing.get_data(as_text=True), "html.parser"
+            )
+            self.assertIn("error-page", missing_page.body.get("class", []))
+            state = missing_page.select_one(
+                "section.error-page-state[role='status']"
+            )
+            self.assertIsNotNone(state)
+            self.assertEqual(
+                state.select_one(".state-code").get_text(strip=True), "404"
+            )
+            self.assertTrue(state.select_one("h1").get_text(" ", strip=True))
+            self.assertEqual(
+                {link.get("href") for link in state.select(".actions a")},
+                {"/", "/search"},
+            )
+
+        static_dir = Path(__file__).resolve().parent / "static"
+        stylesheet = (static_dir / "styles.css").read_text(encoding="utf-8")
+        rules: dict[str, dict[str, str]] = {}
+        css_without_comments = re.sub(
+            r"/\*.*?\*/", "", stylesheet, flags=re.DOTALL
+        )
+        for match in re.finditer(
+            r"([^{}]+)\{([^{}]*)\}", css_without_comments
+        ):
+            declarations = {}
+            for declaration in match.group(2).split(";"):
+                if ":" not in declaration:
+                    continue
+                property_name, value = declaration.split(":", 1)
+                declarations[property_name.strip()] = value.strip()
+            for selector in match.group(1).split(","):
+                rules.setdefault(selector.strip(), {}).update(declarations)
+        self.assertEqual(rules[":root"]["--content-width"], "1450px")
+        self.assertIn("var(--content-width)", rules[".shell"]["width"])
+        self.assertEqual(rules[".table-wrap"]["overflow-x"], "auto")
+
+        local_assets = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in static_dir.iterdir()
+            if path.is_file() and path.suffix in {".css", ".js"}
+        ).casefold()
+        self.assertNotRegex(local_assets, r"@import\b")
+        self.assertNotRegex(local_assets, r"https?://")
+        self.assertNotRegex(local_assets, r"""url\s*\(\s*['"]?\s*//""")
+        self.assertNotRegex(
+            local_assets,
+            r"""(?:fetch|importscripts)\s*\(\s*['"`]\s*//""",
+        )
 
 
 if __name__ == "__main__":

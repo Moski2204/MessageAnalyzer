@@ -1,41 +1,68 @@
 {% extends "base.html" %}
 {% block title %}Search Report{% endblock %}
+{% block body_class %}search-report-page{% endblock %}
 {% block content %}
   <section class="page-heading compact">
     <p class="eyebrow">Search Report</p>
     <h1>{{ "{:,}".format(total) }} matching message{% if total != 1 %}s{% endif %}</h1>
-    <p>Page {{ filters.page }} of {{ total_pages }} · {{ "Oldest" if filters.direction == "asc" else "Newest" }} first</p>
+    <p>Review complete matches with the active filters and open any result in its conversation.</p>
   </section>
 
-  <section class="filter-summary">
-    <span><strong>Query:</strong> {{ filters.q or "None" }}</span>
-    <span><strong>Mode:</strong> {{ filters.mode }}</span>
-    <span><strong>Sender:</strong> {{ filters.sender or "All" }}</span>
-    <span><strong>Dates:</strong> {{ filters.start_date or "Beginning" }} → {{ filters.end_date or "End" }}</span>
-  </section>
+  <section class="panel search-report-summary" aria-label="Active search filters">
+    <div class="filter-summary">
+      <span><strong>Query:</strong> {{ filters.q or "None" }}</span>
+      <span><strong>Mode:</strong> {{ filters.mode }}</span>
+      <span><strong>Sender:</strong> {{ filters.sender or "All" }}</span>
+      <span><strong>Dates:</strong> {{ filters.start_date or "Beginning" }} → {{ filters.end_date or "End" }}</span>
+      <span><strong>Sort:</strong> {{ "Newest first" if filters.direction == "desc" else "Oldest first" }}</span>
+    </div>
 
-  <div class="toolbar">
-    <a class="button secondary" href="{{ url_for('search', **filters) }}">Edit Search</a>
-    <a class="button secondary" href="{{ url_for('search') }}">Clear Search</a>
-    <a class="button secondary" href="{{ urls.oldest }}">Oldest First</a>
-    <a class="button secondary" href="{{ urls.newest }}">Newest First</a>
-    <a class="button primary" href="{{ urls.download }}">Download Report</a>
-  </div>
+    <div class="toolbar search-report-toolbar">
+      <div class="actions search-report-actions">
+        <a class="button secondary" href="{{ url_for('search', **filters) }}">Edit Search</a>
+        <a class="button secondary" href="{{ url_for('search') }}">Clear Search</a>
+        {% if filters.direction == "asc" %}
+          <span class="button secondary is-current" aria-current="true">Oldest First</span>
+        {% else %}
+          <a class="button secondary" href="{{ urls.oldest }}">Oldest First</a>
+        {% endif %}
+        {% if filters.direction == "desc" %}
+          <span class="button secondary is-current" aria-current="true">Newest First</span>
+        {% else %}
+          <a class="button secondary" href="{{ urls.newest }}">Newest First</a>
+        {% endif %}
+        <a class="button primary" href="{{ urls.download }}">Download Report</a>
+      </div>
+
+      <nav class="pager compact-pager" aria-label="Search result pages at top">
+        {% if urls.previous %}<a class="button secondary" href="{{ urls.previous }}">Previous Page</a>{% endif %}
+        <span class="page-indicator">Page {{ filters.page }} of {{ total_pages }}</span>
+        {% if urls.next %}<a class="button secondary" href="{{ urls.next }}">Next Page</a>{% endif %}
+      </nav>
+    </div>
+  </section>
 
   {% if not results %}
-    <div class="notice">No messages matched your search.</div>
+    <section class="empty-state search-empty-state">
+      <span class="state-icon" aria-hidden="true">0</span>
+      <div>
+        <h2>No messages matched your search</h2>
+        <p>Try editing the text, sender, or date filters.</p>
+      </div>
+    </section>
   {% endif %}
 
-  <div class="results">
+  <div class="results search-match-list">
     {% for result in results %}
-      <section class="result-group">
+      <section class="result-group search-match-group">
         {% set message = result %}
-        <article class="message-card match">
-          <header>
-            <strong>{{ message.sender }}</strong>
-            <span>{{ message.original_timestamp or message.timestamp or "Unknown time" }}</span>
-            <span>{{ message.message_type }}</span>
-            <span>{{ message.source_filename }}</span>
+        <article class="message-card match search-match-card">
+          <header class="message-card-header">
+            <div class="message-card-identity">
+              <strong>{{ message.sender }}</strong>
+              <span>{{ message.original_timestamp or message.timestamp or "Unknown time" }}</span>
+              <span>{{ message.message_type }}</span>
+            </div>
             <span class="match-label">MATCH</span>
           </header>
           <div class="message-text">{{ message.message_text|highlight(filters.q, filters.mode) }}</div>
@@ -44,7 +71,7 @@
               <img
                 class="message-photo"
                 src="{{ url_for('photo', filename=message.attachment_path) }}"
-                alt="Instagram chat photo"
+                alt="Instagram chat photo sent by {{ message.sender }}"
                 loading="lazy"
                 decoding="async"
               >
@@ -52,7 +79,10 @@
               <span class="photo-unavailable">Photo unavailable.</span>
             {% endif %}
           {% endif %}
-          <a class="text-link" href="{{ url_for('conversation', target=message.id, direction='asc') }}#message-{{ message.id }}">View in Full Conversation</a>
+          <footer class="message-source-footer">
+            <span><strong>Source:</strong> {{ message.source_filename }}</span>
+            <a class="button secondary" href="{{ url_for('conversation', target=message.id, direction='asc') }}#message-{{ message.id }}">View in Conversation</a>
+          </footer>
         </article>
       </section>
     {% endfor %}
@@ -60,7 +90,7 @@
 
   <nav class="pager" aria-label="Search result pages">
     {% if urls.previous %}<a class="button secondary" href="{{ urls.previous }}">Previous Page</a>{% endif %}
-    <span>Page {{ filters.page }} of {{ total_pages }}</span>
+    <span class="page-indicator">Page {{ filters.page }} of {{ total_pages }}</span>
     {% if urls.next %}<a class="button secondary" href="{{ urls.next }}">Next Page</a>{% endif %}
   </nav>
 {% endblock %}

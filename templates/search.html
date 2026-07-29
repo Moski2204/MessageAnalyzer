@@ -1,61 +1,88 @@
 {% extends "base.html" %}
 {% block title %}Search Conversation{% endblock %}
+{% block body_class %}search-page{% endblock %}
 {% block content %}
   <section class="page-heading compact">
     <p class="eyebrow">Find messages</p>
     <h1>Search Conversation</h1>
-    <p>Text is searched locally in SQLite. Sender and date filters also work with an empty search box.</p>
+    <p>Find messages using keywords, sender, dates, and search options.</p>
   </section>
 
-  <form class="panel form-grid" method="get" action="{{ url_for('search_report') }}">
-    <label class="wide">
-      Search text
-      <input type="search" name="q" maxlength="500" value="{{ filters.q }}" placeholder="Word, phrase, emoji, or text">
-    </label>
-    <label>
-      Search mode
-      <select name="mode">
-        <option value="contains" {% if filters.mode == "contains" %}selected{% endif %}>Contains text</option>
-        <option value="phrase" {% if filters.mode == "phrase" %}selected{% endif %}>Exact phrase</option>
-        <option value="all" {% if filters.mode == "all" %}selected{% endif %}>All words</option>
-        <option value="any" {% if filters.mode == "any" %}selected{% endif %}>Any word</option>
-      </select>
-    </label>
-    <label>
-      Sender
-      <select name="sender">
-        <option value="">All senders</option>
-        {% for sender in senders %}
-          <option value="{{ sender }}" {% if filters.sender == sender %}selected{% endif %}>{{ sender }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>
-      Start date
-      <input type="date" name="start_date" value="{{ filters.start_date }}">
-    </label>
-    <label>
-      End date
-      <input type="date" name="end_date" value="{{ filters.end_date }}">
-    </label>
-    <label>
-      Sort
-      <select name="direction">
-        <option value="asc" {% if filters.direction == "asc" %}selected{% endif %}>Oldest first</option>
-        <option value="desc" {% if filters.direction == "desc" %}selected{% endif %}>Newest first</option>
-      </select>
-    </label>
-    <label>
-      Results per page
-      <select name="per_page">
-        {% for size in [25, 50, 100] %}
-          <option value="{{ size }}" {% if filters.per_page == size %}selected{% endif %}>{{ size }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <div class="wide actions">
-      <button class="button primary" type="submit">Search</button>
-      <a class="button secondary" href="{{ url_for('search') }}">Clear</a>
-    </div>
+  <form class="panel search-workspace" method="get" action="{{ url_for('search_report') }}">
+    <fieldset class="form-section search-primary-section">
+      <legend>Search</legend>
+      <div class="search-primary-grid">
+        <label class="search-query-field">
+          <span>Search text</span>
+          <input
+            type="search"
+            name="q"
+            maxlength="500"
+            value="{{ filters.q }}"
+            placeholder="Word, phrase, emoji, or text"
+            autocomplete="off"
+          >
+          <small>Plain-language searches work—no SQLite syntax is needed.</small>
+        </label>
+        <label>
+          <span>Search mode</span>
+          <select name="mode">
+            <option value="contains" {% if filters.mode == "contains" %}selected{% endif %}>Contains text</option>
+            <option value="phrase" {% if filters.mode == "phrase" %}selected{% endif %}>Exact phrase</option>
+            <option value="all" {% if filters.mode == "all" %}selected{% endif %}>All words</option>
+            <option value="any" {% if filters.mode == "any" %}selected{% endif %}>Any word</option>
+          </select>
+        </label>
+        <div class="search-submit-group">
+          <button class="button primary" type="submit">Search</button>
+          <a class="button secondary" href="{{ url_for('search') }}">Clear</a>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset class="form-section">
+      <legend>Filters</legend>
+      <div class="form-row four-columns">
+        <label>
+          <span>Sender</span>
+          <select name="sender">
+            <option value="">All senders</option>
+            {% for sender in senders %}
+              <option value="{{ sender }}" {% if filters.sender == sender %}selected{% endif %}>{{ sender }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>Start date</span>
+          <input type="date" name="start_date" value="{{ filters.start_date }}">
+        </label>
+        <label>
+          <span>End date</span>
+          <input type="date" name="end_date" value="{{ filters.end_date }}">
+        </label>
+        <label>
+          <span>Sort direction</span>
+          <select name="direction">
+            <option value="asc" {% if filters.direction == "asc" %}selected{% endif %}>Oldest first</option>
+            <option value="desc" {% if filters.direction == "desc" %}selected{% endif %}>Newest first</option>
+          </select>
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset class="form-section display-section">
+      <legend>Result Display</legend>
+      <div class="display-options">
+        <label>
+          <span>Results per page</span>
+          <select name="per_page">
+            {% for size in [25, 50, 100] %}
+              <option value="{{ size }}" {% if filters.per_page == size %}selected{% endif %}>{{ size }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <p>Photos load only when their matching message appears on the current page.</p>
+      </div>
+    </fieldset>
   </form>
 {% endblock %}

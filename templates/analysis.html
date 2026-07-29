@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Analysis{% endblock %}
+{% block body_class %}analysis-page{% endblock %}
 {% block content %}
   <section class="page-heading compact">
     <p class="eyebrow">Descriptive measurements</p>
-    <h1>Analysis</h1>
-    <p>Choose a date range or explicitly select the full conversation. Opening this page never starts a calculation.</p>
+    <h1>Conversation Analysis</h1>
+    <p>Explore response times, common words, sentiment, and conversation patterns. Opening this page never starts a calculation.</p>
   </section>
 
   {% if cache_recovered %}
@@ -12,83 +13,130 @@
   {% endif %}
 
   {% if active_job %}
-    <div class="notice">
+    <aside class="notice" aria-label="Analysis currently running">
       <strong>Analysis currently running.</strong>
       {{ "{:,}".format(active_job.processed_messages) }} of {{ "{:,}".format(active_job.total_messages) }} messages processed.
       <a href="{{ url_for('analysis_job_page', job_id=active_job.job_id) }}">View progress</a>
-    </div>
+    </aside>
   {% endif %}
 
-  <form class="panel form-grid" method="post" action="{{ url_for('start_analysis') }}">
-    <input type="hidden" name="action_token" value="{{ action_token }}">
-    <label>
-      Start date
-      <input type="date" name="start_date" value="{{ values.start_date }}">
-    </label>
-    <label>
-      End date
-      <input type="date" name="end_date" value="{{ values.end_date }}">
-    </label>
-    <label>
-      Frequent words
-      <select name="top_n">
-        {% for size in [20, 50, 100] %}
-          <option value="{{ size }}" {% if values.top_n == size %}selected{% endif %}>Top {{ size }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label class="checkbox-label wide">
-      <input type="checkbox" name="full_conversation" value="1" {% if values.full_conversation %}checked{% endif %}>
-      <span><strong>Full Conversation</strong><small>Ignore the date fields and analyze every message.</small></span>
-    </label>
-    <label class="wide">
-      Stop words (editable)
-      <textarea name="stop_words" rows="5">{{ values.stop_words }}</textarea>
-    </label>
-    <div class="notice warning wide">
-      A full-conversation analysis may take several minutes the first time. It runs in the background and is reused from the local cache afterward.
-    </div>
-    <div class="wide actions">
-      <button class="button primary" type="submit">Analyze</button>
-    </div>
-  </form>
+  <div class="two-column">
+    <section class="analysis-section analysis-setup" aria-labelledby="analysis-setup-heading">
+      <header>
+        <p class="eyebrow">Step 1</p>
+        <h2 id="analysis-setup-heading">Set up the analysis</h2>
+        <p class="section-note">Select one scope, then choose how many frequent words to include.</p>
+      </header>
 
-  <section class="analysis-section">
-    <h2>Previous cached results</h2>
+      <form class="form-grid" method="post" action="{{ url_for('start_analysis') }}">
+        <input type="hidden" name="action_token" value="{{ action_token }}">
+        <label>
+          Start date
+          <input type="date" name="start_date" value="{{ values.start_date }}">
+        </label>
+        <label>
+          End date
+          <input type="date" name="end_date" value="{{ values.end_date }}">
+        </label>
+        <label>
+          Frequent words
+          <select name="top_n">
+            {% for size in [20, 50, 100] %}
+              <option value="{{ size }}" {% if values.top_n == size %}selected{% endif %}>Top {{ size }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="checkbox-label wide">
+          <input type="checkbox" name="full_conversation" value="1" {% if values.full_conversation %}checked{% endif %}>
+          <span>
+            <strong>Full Conversation</strong>
+            <small>Ignore the date fields and analyze every message.</small>
+          </span>
+        </label>
+        <label class="wide">
+          Stop words (editable)
+          <textarea name="stop_words" rows="5">{{ values.stop_words }}</textarea>
+        </label>
+        <div class="wide actions">
+          <button class="button primary" type="submit">Analyze</button>
+        </div>
+      </form>
+    </section>
+
+    <aside class="analysis-section" aria-labelledby="analysis-expectations-heading">
+      <p class="eyebrow">What to expect</p>
+      <h2 id="analysis-expectations-heading">Runs locally in the background</h2>
+      <ol>
+        <li>The selected messages are read from the local SQLite database.</li>
+        <li>Response times, frequent words, sentiment, and conversation patterns are measured.</li>
+        <li>The completed summaries are saved to the separate local analysis cache.</li>
+      </ol>
+      <div class="notice warning">
+        A full-conversation analysis may take several minutes the first time. You can leave the progress page while it runs, and the completed result is reused from the local cache afterward.
+      </div>
+      <p class="section-note">No message files or photos are uploaded or changed.</p>
+    </aside>
+  </div>
+
+  <section class="analysis-section" aria-labelledby="cached-results-heading">
+    <header>
+      <p class="eyebrow">Ready to reopen</p>
+      <h2 id="cached-results-heading">Previous cached results</h2>
+      <p class="section-note">Opening a completed result does not run the calculations again.</p>
+    </header>
     {% if recent_jobs %}
-      <div class="cache-list">
-        {% for cached in recent_jobs %}
-          <article class="panel cache-entry">
-            <div>
-              <strong>
-                {% if cached.settings.full_conversation %}
-                  Full Conversation
-                {% else %}
-                  {{ cached.settings.start_date }} to {{ cached.settings.end_date }}
-                {% endif %}
-              </strong>
-              <span>{{ "{:,}".format(cached.total_messages) }} messages</span>
-            </div>
-            <div>
-              <span>Calculated {{ cached.completed_at }}</span>
-              <span>{{ "%.1f"|format(cached.elapsed_seconds) }} seconds</span>
-            </div>
-            <a class="button secondary" href="{{ url_for('analysis_result', job_id=cached.job_id, cached=1) }}">Open cached result</a>
-          </article>
-        {% endfor %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Scope</th>
+              <th>Messages</th>
+              <th>Completed</th>
+              <th>Calculation time</th>
+              <th>Result</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for cached in recent_jobs %}
+              <tr>
+                <td>
+                  <strong>
+                    {% if cached.settings.full_conversation %}
+                      Full Conversation
+                    {% else %}
+                      {{ cached.settings.start_date }} to {{ cached.settings.end_date }}
+                    {% endif %}
+                  </strong>
+                </td>
+                <td>{{ "{:,}".format(cached.total_messages) }}</td>
+                <td>{{ cached.completed_at }}</td>
+                <td>{{ "%.1f"|format(cached.elapsed_seconds) }} seconds</td>
+                <td><a class="button secondary" href="{{ url_for('analysis_result', job_id=cached.job_id, cached=1) }}">Open cached result</a></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
       </div>
     {% else %}
       <div class="notice">No completed analysis is cached yet.</div>
     {% endif %}
   </section>
 
-  <section class="analysis-section">
-    <h2>Analysis cache</h2>
-    <p>The separate local cache currently uses {{ cache_size }}. Clearing it does not touch messages.db, data/, photos, exports, or reports.</p>
-    <form method="post" action="{{ url_for('clear_analysis_cache') }}" onsubmit="return confirm('Clear all cached analysis results? Your messages and photos will remain untouched.');">
-      <input type="hidden" name="action_token" value="{{ action_token }}">
-      <input type="hidden" name="confirm" value="clear">
-      <button class="button secondary" type="submit">Clear Analysis Cache</button>
-    </form>
+  <section class="analysis-section" aria-labelledby="analysis-cache-heading">
+    <div class="two-column">
+      <div>
+        <p class="eyebrow">Local storage</p>
+        <h2 id="analysis-cache-heading">Analysis cache</h2>
+        <p>The separate local cache currently uses <strong>{{ cache_size }}</strong>.</p>
+        <p class="section-note">Clearing it does not touch messages.db, data/, photos, exports, or reports.</p>
+      </div>
+      <div>
+        <form method="post" action="{{ url_for('clear_analysis_cache') }}" onsubmit="return confirm('Clear all cached analysis results? Your messages and photos will remain untouched.');">
+          <input type="hidden" name="action_token" value="{{ action_token }}">
+          <input type="hidden" name="confirm" value="clear">
+          <button class="button danger" type="submit">Clear Analysis Cache</button>
+        </form>
+      </div>
+    </div>
   </section>
 {% endblock %}
