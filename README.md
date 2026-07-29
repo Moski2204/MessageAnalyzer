@@ -1,14 +1,12 @@
 # Instagram Message Analyzer
 
-A private, local Flask application for importing, searching, browsing, and
-measuring one Instagram HTML conversation export. The app reads
-`data/message_*.html`, builds a local SQLite/FTS5 database, and never uploads
-message data.
+A private, local Flask viewer for an existing Instagram conversation database.
+The app searches, browses, measures, and reports on the SQLite database at
+`instance/messages.db`; it does not upload message data.
 
-This copy is configured to import only messages whose sender label is
-`Mahrus` or `🐧`. Messages attributed to Meta AI or any other sender label are
-excluded from the generated database, search, conversation browser, reports,
-and analysis.
+This copy is configured to show only messages whose sender label is `Mahrus` or
+`🐧`. Messages attributed to Meta AI or any other sender label are excluded
+from the database viewer, search, conversation browser, reports, and analysis.
 
 ## Install on Windows
 
@@ -20,27 +18,45 @@ py -m venv .venv
 pip install -r requirements.txt
 ```
 
-If PowerShell blocks activation, you can run the virtual environment's Python
-directly:
+If PowerShell blocks activation, you can install dependencies with the virtual
+environment's Python directly:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe app.py
 ```
 
 ## Start
 
+For normal use, run:
+
 ```powershell
 .\.venv\Scripts\python.exe app.py
 ```
 
-Open <http://127.0.0.1:5000>. The server binds only to `127.0.0.1`, and debug
-mode and hot reload are off. Stop and restart the command manually after
-changing application source files.
+Open <http://127.0.0.1:5000>. The server binds only to `127.0.0.1`; debug mode
+and hot reload are off. Stop and restart the command manually after changing
+application source files.
 
-On Home, select **Import Messages**. The import automatically discovers and
-numerically sorts every `data/message_*.html` file. It may take several minutes
-for a very large export. The original `data/` files are never changed.
+## Existing local database
+
+The viewer requires the existing local database:
+
+```text
+instance/
+  messages.db
+```
+
+The application has no web action or command-line option to import message
+files, rebuild the database, or recreate a missing database. Keep a private
+backup of `instance/messages.db`. If the database is missing or corrupted,
+stop the application and restore that file from your backup before starting it
+again.
+
+The database is local private data and should remain ignored by Git. The viewer
+opens it read-only during normal requests. SQLite stores message text and safe
+photo paths relative to `data/photos`; it does not store photo binaries.
+
+## Local source data and photos
 
 Keep the private export in this local layout:
 
@@ -53,18 +69,21 @@ data/
     <Instagram photo files>
 ```
 
-The entire `data/` directory is ignored by Git. Do not move the photos into
-`static/`: the app serves verified local images through its restricted
-`/photos/<filename>` route. During import, photo references are matched once
-against `data/photos`, and SQLite stores only paths relative to that directory.
-Missing or ambiguous matches are not guessed and appear as **Photo
-unavailable**.
+The application does not edit, move, rename, or delete anything in `data/`.
+The entire `data/` directory remains local and ignored by Git. Git ignoring a
+file does not prevent Flask from reading it.
 
-You can also import without opening the web page:
+Do not move photos into the Git-tracked `static/` directory. The app serves
+verified local images through its restricted `/photos/<filename>` route. The
+route resolves only safe relative paths beneath `data/photos`, rejects paths
+that could traverse outside that approved directory, and never fetches missing
+photos from Instagram or another external source.
 
-```powershell
-python app.py --import-data
-```
+Each message's stored relative photo path connects that message to its matching
+local file. Missing or invalid references appear as **Photo unavailable**.
+Pages request photos only for the messages currently displayed, and each image
+uses browser lazy loading, so the app does not scan or load the entire photos
+folder at once.
 
 ## Use
 
@@ -102,21 +121,10 @@ cares more.
 
 Use **Download Report** on a Search Report to create a complete, self-contained
 HTML search report. Use **Download Analysis Report** on Analysis for a summary
-report. Reports are saved in `reports/` and downloaded by the browser. They
-contain inline CSS, no external scripts, and no tracking.
+report. Reports are saved locally in `reports/` and downloaded by the browser.
+They contain inline CSS, no external scripts, and no tracking. Keep generated
+reports local and ignored by Git because they can contain private message data.
 
-## Database and rebuilding
-
-The generated database is `instance/messages.db`. **Rebuild Database** deletes
-only that generated database and recreates it from the original HTML files.
-It never deletes or edits anything in `data/`.
-
-To rebuild from PowerShell:
-
-```powershell
-python app.py --rebuild
-```
-
-The Instagram message timestamps in this export do not include timezone
+The Instagram message timestamps in this database do not include timezone
 information. The app preserves the original timestamp text and treats its
 clock fields as a stable timezone-neutral ordering value.

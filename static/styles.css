@@ -1,5 +1,4 @@
 :root {
-  /* Watched locally so open app pages reload after style changes. */
   --ink: #202124;
   --muted: #6d6b75;
   --paper: #ffffff;
@@ -8,7 +7,6 @@
   --accent: #6647d7;
   --accent-dark: #4e31b8;
   --soft-accent: #eee9ff;
-  --success: #e7f7ed;
   --warning: #fff5d9;
   --error: #ffe7e7;
   color-scheme: light;
@@ -56,7 +54,6 @@ h3 small { color: var(--muted); font-weight: 500; }
 .stat span { display: block; margin-bottom: .25rem; color: var(--muted); font-size: .82rem; }
 .stat strong { display: block; overflow-wrap: anywhere; font-size: 1.12rem; }
 .actions, .toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; margin: 1rem 0; }
-.actions form { margin: 0; }
 .button {
   display: inline-flex;
   align-items: center;
@@ -76,8 +73,7 @@ h3 small { color: var(--muted); font-weight: 500; }
 .button.secondary:hover { border-color: var(--accent); }
 .notice, .flash { margin: 1rem 0; padding: .9rem 1rem; border: 1px solid var(--line); border-radius: 10px; background: white; }
 .notice.warning, .flash.warning { background: var(--warning); }
-.flash.success { background: var(--success); }
-.flash.error { background: var(--error); }
+.notice.error, .flash.error { background: var(--error); }
 .privacy-note, .section-note, .footer { color: var(--muted); font-size: .9rem; }
 .panel { padding: 1rem; }
 .form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .9rem; }

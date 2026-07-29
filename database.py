@@ -1,4 +1,4 @@
-"""SQLite storage, FTS5 search, import, and pagination."""
+"""Read-only SQLite access, FTS5 search, and pagination."""
 
 from __future__ import annotations
 
@@ -8,21 +8,13 @@ import re
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Iterator
 
-from analysis import LocalSentiment
-from parser import (
-    ParsedMessage,
-    PhotoIndex,
-    discover_message_files,
-    normalize_text,
-    parse_message_file,
-)
+from parser import normalize_text
 
 
 WORD_RE = re.compile(r"[^\W_]+(?:['’][^\W_]+)*", re.UNICODE)
 VALID_SEARCH_MODES = {"contains", "phrase", "all", "any"}
-ALLOWED_SENDERS = frozenset({"Mahrus", "🐧"})
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -35,75 +27,29 @@ class ClosingConnection(sqlite3.Connection):
             self.close()
 
 
-def connect(database_path: Path) -> sqlite3.Connection:
-    database_path.parent.mkdir(parents=True, exist_ok=True)
+def connect_readonly(database_path: Path) -> sqlite3.Connection:
+    """Open an existing database without creating or modifying local files."""
+    if not database_path.is_file():
+        raise sqlite3.OperationalError("The local message database is missing.")
+    database_uri = f"{database_path.resolve().as_uri()}?mode=ro&immutable=1"
     connection = sqlite3.connect(
-        database_path,
+        database_uri,
+        uri=True,
         timeout=30,
         factory=ClosingConnection,
     )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 30000")
     connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA query_only = ON")
     return connection
-
-
-def initialize_schema(connection: sqlite3.Connection) -> None:
-    connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY,
-            sender TEXT NOT NULL,
-            timestamp TEXT,
-            timestamp_unix INTEGER,
-            original_timestamp TEXT NOT NULL,
-            message_text TEXT NOT NULL,
-            normalized_text TEXT NOT NULL,
-            message_type TEXT NOT NULL,
-            source_filename TEXT NOT NULL,
-            source_file_number INTEGER NOT NULL,
-            source_position INTEGER NOT NULL,
-            attachment_path TEXT,
-            external_url TEXT,
-            deduplication_key TEXT NOT NULL UNIQUE,
-            conversation_position INTEGER,
-            sentiment_label TEXT,
-            sentiment_score REAL
-        );
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-            message_text,
-            content='messages',
-            content_rowid='id',
-            tokenize='unicode61 remove_diacritics 0'
-        );
-
-        CREATE TABLE IF NOT EXISTS app_metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS import_errors (
-            source_filename TEXT PRIMARY KEY,
-            error_type TEXT NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
-        CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp_unix);
-        CREATE INDEX IF NOT EXISTS idx_messages_timestamp_text ON messages(timestamp);
-        CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(message_type);
-        CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source_filename);
-        CREATE INDEX IF NOT EXISTS idx_messages_position ON messages(conversation_position);
-        """
-    )
 
 
 def database_ready(database_path: Path) -> bool:
     if not database_path.is_file():
         return False
     try:
-        with connect(database_path) as connection:
+        with connect_readonly(database_path) as connection:
             row = connection.execute(
                 "SELECT value FROM app_metadata WHERE key = 'import_summary'"
             ).fetchone()
@@ -112,192 +58,33 @@ def database_ready(database_path: Path) -> bool:
         return False
 
 
-def _message_values(
-    message: ParsedMessage, sentiment: LocalSentiment
-) -> tuple[Any, ...]:
-    label, score = sentiment.score(message.message_text, message.message_type)
-    return (
-        message.sender,
-        message.timestamp,
-        message.timestamp_unix,
-        message.original_timestamp,
-        message.message_text,
-        message.normalized_text,
-        message.message_type,
-        message.source_filename,
-        message.source_file_number,
-        message.source_position,
-        message.attachment_path,
-        message.external_url,
-        message.deduplication_key,
-        label,
-        score,
-    )
-
-
-INSERT_SQL = """
-    INSERT OR IGNORE INTO messages (
-        sender, timestamp, timestamp_unix, original_timestamp, message_text,
-        normalized_text, message_type, source_filename, source_file_number,
-        source_position, attachment_path, external_url, deduplication_key,
-        sentiment_label, sentiment_score
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-"""
-
-
-def import_messages(
-    data_dir: Path,
-    database_path: Path,
-    rebuild: bool = False,
-    progress_callback: Callable[[int, int, str, bool], None] | None = None,
-    allowed_senders: set[str] | frozenset[str] | None = ALLOWED_SENDERS,
-) -> dict[str, Any]:
-    """Import every discovered HTML chunk. Never writes inside data_dir."""
-    if rebuild:
-        # These are the only SQLite-generated files removed by a rebuild.
-        for generated_path in (
-            database_path,
-            Path(f"{database_path}-wal"),
-            Path(f"{database_path}-shm"),
-        ):
-            if generated_path.is_file():
-                generated_path.unlink()
-
-    files = discover_message_files(data_dir)
-    photo_index = PhotoIndex.build(data_dir / "photos")
-    sentiment = LocalSentiment()
-    stats: dict[str, Any] = {
-        "files_found": len(files),
-        "files_processed": 0,
-        "files_failed": 0,
-        "messages_imported": 0,
-        "duplicates_skipped": 0,
-        "messages_skipped_other_senders": 0,
-        "oldest_timestamp": None,
-        "newest_timestamp": None,
-        "sentiment_method": sentiment.method,
-        "photo_files_indexed": photo_index.file_count,
-        "ambiguous_photo_filenames": photo_index.ambiguous_filename_count,
-        "photo_references_matched": 0,
-        "photo_references_unavailable": 0,
-    }
-
-    with connect(database_path) as connection:
-        initialize_schema(connection)
-        connection.execute("DELETE FROM messages")
-        connection.execute("DELETE FROM messages_fts")
-        connection.execute("DELETE FROM import_errors")
-        connection.execute("DELETE FROM app_metadata WHERE key = 'import_summary'")
-        connection.commit()
-
-        for file_index, path in enumerate(files, start=1):
-            eligible_count = 0
-            inserted_before = connection.total_changes
-            batch: list[tuple[Any, ...]] = []
-            try:
-                for message in parse_message_file(path, data_dir, photo_index):
-                    if allowed_senders is not None and message.sender not in allowed_senders:
-                        stats["messages_skipped_other_senders"] += 1
-                        continue
-                    eligible_count += 1
-                    batch.append(_message_values(message, sentiment))
-                    if len(batch) >= 1000:
-                        connection.executemany(INSERT_SQL, batch)
-                        batch.clear()
-                if batch:
-                    connection.executemany(INSERT_SQL, batch)
-                inserted = connection.total_changes - inserted_before
-                stats["messages_imported"] += inserted
-                stats["duplicates_skipped"] += eligible_count - inserted
-                stats["files_processed"] += 1
-                connection.commit()
-                if progress_callback:
-                    progress_callback(file_index, len(files), path.name, True)
-            except Exception as exc:
-                connection.rollback()
-                stats["files_failed"] += 1
-                connection.execute(
-                    "INSERT OR REPLACE INTO import_errors(source_filename, error_type) VALUES (?, ?)",
-                    (path.name, type(exc).__name__),
-                )
-                connection.commit()
-                if progress_callback:
-                    progress_callback(file_index, len(files), path.name, False)
-
-        connection.execute("DROP TABLE IF EXISTS temp.ordered_positions")
-        connection.execute(
-            """
-            CREATE TEMP TABLE ordered_positions AS
-            SELECT id,
-                   ROW_NUMBER() OVER (
-                       ORDER BY
-                           CASE WHEN timestamp_unix IS NULL THEN 1 ELSE 0 END,
-                           timestamp_unix ASC,
-                           source_file_number DESC,
-                           source_position DESC,
-                           id ASC
-                   ) AS position
-            FROM messages
-            """
-        )
-        connection.execute(
-            "CREATE UNIQUE INDEX temp.idx_ordered_positions_id ON ordered_positions(id)"
-        )
-        connection.execute(
-            """
-            UPDATE messages
-            SET conversation_position = (
-                SELECT position
-                FROM ordered_positions
-                WHERE ordered_positions.id = messages.id
-            )
-            """
-        )
-        connection.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
-
-        date_row = connection.execute(
-            """
-            SELECT MIN(timestamp) AS oldest_timestamp,
-                   MAX(timestamp) AS newest_timestamp
-            FROM messages
-            WHERE timestamp_unix IS NOT NULL
-            """
-        ).fetchone()
-        stats["oldest_timestamp"] = date_row["oldest_timestamp"]
-        stats["newest_timestamp"] = date_row["newest_timestamp"]
-        photo_row = connection.execute(
-            """
-            SELECT
-                SUM(CASE WHEN attachment_path IS NOT NULL THEN 1 ELSE 0 END)
-                    AS matched,
-                SUM(CASE WHEN attachment_path IS NULL THEN 1 ELSE 0 END)
-                    AS unavailable
-            FROM messages
-            WHERE message_type = 'photo'
-            """
-        ).fetchone()
-        stats["photo_references_matched"] = int(photo_row["matched"] or 0)
-        stats["photo_references_unavailable"] = int(
-            photo_row["unavailable"] or 0
-        )
-        connection.execute(
-            "INSERT INTO app_metadata(key, value) VALUES ('import_summary', ?)",
-            (json.dumps(stats, ensure_ascii=False),),
-        )
-        connection.execute("PRAGMA optimize")
-        connection.commit()
-    return stats
-
-
-def get_import_summary(database_path: Path) -> dict[str, Any] | None:
+def get_database_summary(database_path: Path) -> dict[str, Any] | None:
     if not database_path.is_file():
         return None
     try:
-        with connect(database_path) as connection:
+        with connect_readonly(database_path) as connection:
             row = connection.execute(
                 "SELECT value FROM app_metadata WHERE key = 'import_summary'"
             ).fetchone()
-            return json.loads(row["value"]) if row else None
+        if not row:
+            return None
+        stored = json.loads(row["value"])
+        if not isinstance(stored, dict):
+            return None
+        summary = {
+            "message_count": stored.get("messages_imported", 0),
+            "oldest_timestamp": stored.get("oldest_timestamp"),
+            "newest_timestamp": stored.get("newest_timestamp"),
+        }
+        for optional_key in (
+            "files_processed",
+            "files_found",
+            "duplicates_skipped",
+            "messages_skipped_other_senders",
+        ):
+            if optional_key in stored:
+                summary[optional_key] = stored[optional_key]
+        return summary
     except (sqlite3.Error, json.JSONDecodeError):
         return None
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import logging
 import math
@@ -28,13 +27,12 @@ from markupsafe import Markup, escape
 from analysis import DEFAULT_STOP_WORDS, WORD_RE, analyze_messages, parse_stop_words
 from database import (
     clean_search_filters,
-    connect,
+    connect_readonly,
     conversation_page,
     database_ready,
     date_to_unix,
-    get_import_summary,
+    get_database_summary,
     get_senders,
-    import_messages,
     page_for_message,
     search_messages,
 )
@@ -46,6 +44,10 @@ DATA_DIR = BASE_DIR / "data"
 PHOTO_DIR = DATA_DIR / "photos"
 DATABASE_PATH = BASE_DIR / "instance" / "messages.db"
 REPORTS_DIR = BASE_DIR / "reports"
+DATABASE_UNAVAILABLE_MESSAGE = (
+    "The local message database could not be found. Restore "
+    "instance/messages.db from your backup before using the application."
+)
 
 app = Flask(__name__)
 app.config.update(
@@ -81,7 +83,6 @@ def _development_version() -> str:
 
 def _ready_or_redirect():
     if not database_ready(DATABASE_PATH):
-        flash("The conversation has not been imported yet.", "warning")
         return redirect(url_for("index"))
     return None
 
@@ -194,7 +195,11 @@ app.jinja_env.filters["highlight"] = _highlight
 
 @app.route("/")
 def index():
-    return render_template("index.html", summary=get_import_summary(DATABASE_PATH))
+    return render_template(
+        "index.html",
+        summary=get_database_summary(DATABASE_PATH),
+        database_unavailable_message=DATABASE_UNAVAILABLE_MESSAGE,
+    )
 
 
 @app.get("/__dev/version")
@@ -204,40 +209,13 @@ def development_version():
     return response
 
 
-@app.post("/import")
-def import_route():
-    try:
-        stats = import_messages(DATA_DIR, DATABASE_PATH, rebuild=False)
-        if stats["files_failed"]:
-            flash("The import completed with some errors.", "warning")
-        else:
-            flash("Import complete. The original Instagram files were not modified.", "success")
-    except Exception:
-        app.logger.exception("Import failed without logging message contents.")
-        flash("The import could not be completed. The original files were not modified.", "error")
-    return redirect(url_for("index"))
-
-
-@app.post("/rebuild")
-def rebuild_route():
-    try:
-        stats = import_messages(DATA_DIR, DATABASE_PATH, rebuild=True)
-        if stats["files_failed"]:
-            flash("The database was rebuilt with some file errors.", "warning")
-        else:
-            flash("Database rebuilt. The original Instagram files were not modified.", "success")
-    except Exception:
-        app.logger.exception("Database rebuild failed without logging message contents.")
-        flash("The database could not be rebuilt.", "error")
-    return redirect(url_for("index"))
-
-
 @app.route("/search")
 def search():
-    senders: list[str] = []
-    if database_ready(DATABASE_PATH):
-        with connect(DATABASE_PATH) as connection:
-            senders = get_senders(connection)
+    blocked = _ready_or_redirect()
+    if blocked:
+        return blocked
+    with connect_readonly(DATABASE_PATH) as connection:
+        senders = get_senders(connection)
     return render_template(
         "search.html",
         filters=clean_search_filters(request.args),
@@ -251,7 +229,7 @@ def search_report():
     if blocked:
         return blocked
     filters = clean_search_filters(request.args)
-    with connect(DATABASE_PATH) as connection:
+    with connect_readonly(DATABASE_PATH) as connection:
         senders = get_senders(connection)
         total, rows = search_messages(connection, filters)
     rows = _messages_with_photo_availability(rows)
@@ -276,7 +254,7 @@ def download_search_report():
     if blocked:
         return blocked
     filters = clean_search_filters(request.args)
-    with connect(DATABASE_PATH) as connection:
+    with connect_readonly(DATABASE_PATH) as connection:
         total, _ = search_messages(connection, {**filters, "page": 1})
         output_path = generate_search_report(connection, REPORTS_DIR, filters, total)
     return send_file(
@@ -319,7 +297,7 @@ def conversation():
     if blocked:
         return blocked
     values = _conversation_values()
-    with connect(DATABASE_PATH) as connection:
+    with connect_readonly(DATABASE_PATH) as connection:
         senders = get_senders(connection)
         if values["target"] and "page" not in request.args:
             values["page"] = page_for_message(
@@ -384,7 +362,7 @@ def analysis_page():
     if blocked:
         return blocked
     start_date, end_date, top_n, stop_words = _analysis_inputs()
-    with connect(DATABASE_PATH) as connection:
+    with connect_readonly(DATABASE_PATH) as connection:
         result = analyze_messages(
             connection,
             date_to_unix(start_date),
@@ -410,7 +388,7 @@ def download_analysis_report():
     if blocked:
         return blocked
     start_date, end_date, top_n, stop_words = _analysis_inputs()
-    with connect(DATABASE_PATH) as connection:
+    with connect_readonly(DATABASE_PATH) as connection:
         result = analyze_messages(
             connection,
             date_to_unix(start_date),
@@ -448,34 +426,6 @@ def photo(filename: str):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Private Instagram message analyzer")
-    parser.add_argument(
-        "--import-data", action="store_true", help="Import data and exit"
-    )
-    parser.add_argument(
-        "--rebuild", action="store_true", help="Delete the generated database, import, and exit"
-    )
-    args = parser.parse_args()
-    if args.import_data or args.rebuild:
-        def progress(current: int, total: int, filename: str, succeeded: bool) -> None:
-            state = "processed" if succeeded else "failed"
-            print(f"[{current}/{total}] {filename}: {state}", flush=True)
-
-        stats = import_messages(
-            DATA_DIR,
-            DATABASE_PATH,
-            rebuild=args.rebuild,
-            progress_callback=progress,
-        )
-        print(
-            "Import complete: "
-            f"{stats['files_processed']}/{stats['files_found']} files, "
-            f"{stats['messages_imported']} messages, "
-            f"{stats['duplicates_skipped']} duplicates, "
-            f"{stats['messages_skipped_other_senders']} other-sender messages excluded, "
-            f"{stats['files_failed']} failures."
-        )
-        return
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     app.run(
         host="127.0.0.1",

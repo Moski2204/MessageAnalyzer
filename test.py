@@ -1,20 +1,31 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
+
+from bs4 import BeautifulSoup
 
 from analysis import analyze_messages, parse_stop_words
 from database import (
     clean_search_filters,
-    connect,
+    connect_readonly,
     date_to_unix,
-    import_messages,
     page_for_message,
     search_messages,
 )
-from parser import PhotoIndex, discover_message_files, parse_message_file
+from parser import (
+    ParsedMessage,
+    PhotoIndex,
+    discover_message_files,
+    normalize_text,
+    parse_message_file,
+)
 from reports import generate_analysis_report, generate_search_report
 
 
@@ -26,6 +37,172 @@ def message(sender: str, text: str, stamp: str, extra: str = "") -> str:
       <div class="_3-94 _a6-o">{stamp}</div>
     </div>
     """
+
+
+def seed_database(
+    database_path: Path,
+    rows: list[dict[str, Any]],
+    summary_overrides: dict[str, Any] | None = None,
+) -> None:
+    """Create a complete viewer fixture without using production write helpers."""
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(database_path)) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                sender TEXT NOT NULL,
+                timestamp TEXT,
+                timestamp_unix INTEGER,
+                original_timestamp TEXT NOT NULL,
+                message_text TEXT NOT NULL,
+                normalized_text TEXT NOT NULL,
+                message_type TEXT NOT NULL,
+                source_filename TEXT NOT NULL,
+                source_file_number INTEGER NOT NULL,
+                source_position INTEGER NOT NULL,
+                attachment_path TEXT,
+                external_url TEXT,
+                deduplication_key TEXT NOT NULL UNIQUE,
+                conversation_position INTEGER,
+                sentiment_label TEXT,
+                sentiment_score REAL
+            );
+
+            CREATE VIRTUAL TABLE messages_fts USING fts5(
+                message_text,
+                content='messages',
+                content_rowid='id',
+                tokenize='unicode61 remove_diacritics 0'
+            );
+
+            CREATE TABLE app_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE INDEX idx_messages_sender ON messages(sender);
+            CREATE INDEX idx_messages_timestamp ON messages(timestamp_unix);
+            CREATE INDEX idx_messages_position
+                ON messages(conversation_position);
+            """
+        )
+        for position, row in enumerate(rows, start=1):
+            message_text = str(row.get("message_text", ""))
+            timestamp_unix = row.get("timestamp_unix")
+            timestamp = row.get("timestamp")
+            if timestamp is None and timestamp_unix is not None:
+                timestamp = connection.execute(
+                    "SELECT datetime(?, 'unixepoch')", (timestamp_unix,)
+                ).fetchone()[0]
+            connection.execute(
+                """
+                INSERT INTO messages (
+                    sender, timestamp, timestamp_unix, original_timestamp,
+                    message_text, normalized_text, message_type,
+                    source_filename, source_file_number, source_position,
+                    attachment_path, external_url, deduplication_key,
+                    conversation_position, sentiment_label, sentiment_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row.get("sender", "A"),
+                    timestamp,
+                    timestamp_unix,
+                    row.get("original_timestamp", timestamp or "Unknown time"),
+                    message_text,
+                    row.get("normalized_text", normalize_text(message_text)),
+                    row.get("message_type", "text"),
+                    row.get("source_filename", "message_1.html"),
+                    row.get("source_file_number", 1),
+                    row.get("source_position", position - 1),
+                    row.get("attachment_path"),
+                    row.get("external_url"),
+                    row.get("deduplication_key", f"fixture-{position}"),
+                    row.get("conversation_position", position),
+                    row.get("sentiment_label", "neutral"),
+                    row.get("sentiment_score", 0.0),
+                ),
+            )
+        connection.execute(
+            """
+            INSERT INTO messages_fts(rowid, message_text)
+            SELECT id, message_text FROM messages
+            """
+        )
+        oldest_newest = connection.execute(
+            """
+            SELECT MIN(timestamp) AS oldest_timestamp,
+                   MAX(timestamp) AS newest_timestamp
+            FROM messages
+            WHERE timestamp_unix IS NOT NULL
+            """
+        ).fetchone()
+        summary = {
+            "files_found": 1,
+            "files_processed": 1,
+            "files_failed": 0,
+            "messages_imported": len(rows),
+            "duplicates_skipped": 0,
+            "messages_skipped_other_senders": 0,
+            "oldest_timestamp": oldest_newest[0],
+            "newest_timestamp": oldest_newest[1],
+        }
+        if summary_overrides:
+            summary.update(summary_overrides)
+        connection.execute(
+            "INSERT INTO app_metadata(key, value) VALUES ('import_summary', ?)",
+            (json.dumps(summary),),
+        )
+        connection.commit()
+
+
+def parsed_row(parsed: ParsedMessage) -> dict[str, Any]:
+    return {
+        "sender": parsed.sender,
+        "timestamp": parsed.timestamp,
+        "timestamp_unix": parsed.timestamp_unix,
+        "original_timestamp": parsed.original_timestamp,
+        "message_text": parsed.message_text,
+        "normalized_text": parsed.normalized_text,
+        "message_type": parsed.message_type,
+        "source_filename": parsed.source_filename,
+        "source_file_number": parsed.source_file_number,
+        "source_position": parsed.source_position,
+        "attachment_path": parsed.attachment_path,
+        "external_url": parsed.external_url,
+        "deduplication_key": parsed.deduplication_key,
+    }
+
+
+def standard_rows() -> list[dict[str, Any]]:
+    day_start = date_to_unix("2024-01-02")
+    assert day_start is not None
+
+    def row(
+        minute: int,
+        sender: str,
+        text: str,
+        source_position: int,
+    ) -> dict[str, Any]:
+        return {
+            "sender": sender,
+            "timestamp_unix": day_start + (9 * 60 + minute) * 60,
+            "original_timestamp": f"Jan 02, 2024, 9:{minute:02d} am",
+            "message_text": text,
+            "source_position": source_position,
+        }
+
+    return [
+        row(0, "A", "<script>alert(1)</script>", 8),
+        row(1, "A", "First message", 7),
+        row(5, "B", "Second message", 6),
+        row(6, "B", "Hello there?", 5),
+        row(10, "A", "Echo", 4),
+        row(10, "A", "Echo", 3),
+        row(20, "A", "Later & safe", 2),
+        row(21, "A", "سلام 😊 café", 1),
+    ]
 
 
 class MessageAnalyzerTests(unittest.TestCase):
@@ -70,31 +247,51 @@ class MessageAnalyzerTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_discovery_parser_import_dedup_fts_filters_and_target(self):
+    def test_discovery_parser_dedup_fts_filters_and_target(self):
         files = discover_message_files(self.data)
         self.assertEqual([path.name for path in files], ["message_2.html", "message_10.html"])
 
-        parsed = list(parse_message_file(files[0], self.data))
-        self.assertEqual(parsed[0].sender, "Meta AI")
-        self.assertEqual(parsed[1].sender, "A")
-        self.assertEqual(parsed[1].message_text, "سلام 😊 café")
-        self.assertEqual(parsed[2].message_text, "Later & safe")
-        self.assertIsNotNone(parsed[0].timestamp_unix)
+        first_chunk = list(parse_message_file(files[0], self.data))
+        second_chunk = list(parse_message_file(files[1], self.data))
+        self.assertEqual(first_chunk[0].sender, "Meta AI")
+        self.assertEqual(first_chunk[1].sender, "A")
+        self.assertEqual(first_chunk[1].message_text, "سلام 😊 café")
+        self.assertEqual(first_chunk[2].message_text, "Later & safe")
+        self.assertIsNotNone(first_chunk[0].timestamp_unix)
 
-        stats = import_messages(self.data, self.database, allowed_senders={"A", "B"})
-        self.assertEqual(stats["files_processed"], 2)
-        self.assertEqual(stats["files_failed"], 0)
-        self.assertEqual(stats["messages_imported"], 8)
-        self.assertEqual(stats["duplicates_skipped"], 1)
-        self.assertEqual(stats["messages_skipped_other_senders"], 1)
-        repeated_stats = import_messages(
-            self.data, self.database, allowed_senders={"A", "B"}
+        echo_keys = [
+            parsed.deduplication_key
+            for parsed in first_chunk
+            if parsed.message_text == "Echo"
+        ]
+        self.assertEqual(len(echo_keys), 2)
+        self.assertEqual(len(set(echo_keys)), 2)
+        first_second_message = next(
+            parsed
+            for parsed in first_chunk
+            if parsed.message_text == "Second message"
         )
-        self.assertEqual(repeated_stats["messages_imported"], 8)
-        self.assertEqual(repeated_stats["duplicates_skipped"], 1)
-        self.assertEqual(repeated_stats["messages_skipped_other_senders"], 1)
+        overlapping_second_message = next(
+            parsed
+            for parsed in second_chunk
+            if parsed.message_text == "Second message"
+        )
+        self.assertEqual(
+            first_second_message.deduplication_key,
+            overlapping_second_message.deduplication_key,
+        )
 
-        with connect(self.database) as connection:
+        seed_database(
+            self.database,
+            standard_rows(),
+            {
+                "files_found": 2,
+                "files_processed": 2,
+                "duplicates_skipped": 1,
+                "messages_skipped_other_senders": 1,
+            },
+        )
+        with connect_readonly(self.database) as connection:
             filters = clean_search_filters(
                 {
                     "q": "First message",
@@ -134,9 +331,8 @@ class MessageAnalyzerTests(unittest.TestCase):
             self.assertEqual(search_messages(connection, any_words)[0], 1)
 
     def test_analysis_runs_stop_words_and_safe_report(self):
-        stats = import_messages(self.data, self.database, allowed_senders={"A", "B"})
-        self.assertEqual(stats["messages_imported"], 8)
-        with connect(self.database) as connection:
+        seed_database(self.database, standard_rows())
+        with connect_readonly(self.database) as connection:
             result = analyze_messages(
                 connection,
                 date_to_unix("2024-01-02"),
@@ -170,8 +366,8 @@ class MessageAnalyzerTests(unittest.TestCase):
     def test_flask_pages_and_download_routes(self):
         import app as app_module
 
-        import_messages(self.data, self.database, allowed_senders={"A", "B"})
-        with connect(self.database) as connection:
+        seed_database(self.database, standard_rows())
+        with connect_readonly(self.database) as connection:
             target = connection.execute(
                 "SELECT id FROM messages ORDER BY conversation_position LIMIT 1"
             ).fetchone()["id"]
@@ -202,11 +398,32 @@ class MessageAnalyzerTests(unittest.TestCase):
                 ),
             ]
             self.assertTrue(all(response.status_code == 200 for response in checks))
-            self.assertNotIn(
-                "hot_reload.js",
-                checks[0].get_data(as_text=True),
+            home_html = checks[0].get_data(as_text=True)
+            self.assertNotIn("hot_reload.js", home_html)
+            home = BeautifulSoup(home_html, "html.parser")
+            home_actions = home.select("section.actions a.button")
+            self.assertEqual(
+                [action.get_text(" ", strip=True) for action in home_actions],
+                [
+                    "Search Conversation",
+                    "View Full Conversation",
+                    "View Analysis",
+                ],
             )
+            self.assertEqual(
+                [action.get("href") for action in home_actions],
+                ["/search", "/conversation", "/analysis"],
+            )
+            self.assertFalse(home.select("section.actions form"))
+            self.assertFalse(home.select("section.actions button"))
+            self.assertNotIn("Import Messages", home_html)
+            self.assertNotIn("Rebuild Database", home_html)
             self.assertIn("version", checks[1].get_json())
+            for removed_path in ("/import", "/rebuild"):
+                with self.subTest(path=removed_path, method="GET"):
+                    self.assertEqual(client.get(removed_path).status_code, 404)
+                with self.subTest(path=removed_path, method="POST"):
+                    self.assertEqual(client.post(removed_path).status_code, 404)
             search_download = client.get(
                 "/search/report/download?q=not-a-real-match&mode=contains"
             )
@@ -224,6 +441,92 @@ class MessageAnalyzerTests(unittest.TestCase):
             )
             self.assertEqual(analysis_download.status_code, 200)
             analysis_download.close()
+
+    def test_missing_database_shows_one_restore_notice_without_creating_a_file(self):
+        import app as app_module
+
+        missing_database = self.root / "missing-instance" / "messages.db"
+        expected_message = (
+            "The local message database could not be found. Restore "
+            "instance/messages.db from your backup before using the application."
+        )
+
+        with patch.object(app_module, "DATABASE_PATH", missing_database):
+            app_module.app.config["TESTING"] = True
+            client = app_module.app.test_client()
+
+            home = client.get("/")
+            redirected_search = client.get("/search", follow_redirects=True)
+
+        self.assertEqual(home.status_code, 200)
+        self.assertEqual(redirected_search.status_code, 200)
+        for response in (home, redirected_search):
+            html = response.get_data(as_text=True)
+            self.assertEqual(html.count(expected_message), 1)
+            self.assertEqual(html.count("Database unavailable."), 1)
+            self.assertNotIn("Import Messages", html)
+            self.assertNotIn("Rebuild Database", html)
+        self.assertFalse(missing_database.exists())
+
+    def test_corrupt_database_shows_restore_notice_and_redirects_viewer_routes(self):
+        import app as app_module
+
+        corrupt_database = self.root / "corrupt-instance" / "messages.db"
+        corrupt_database.parent.mkdir(parents=True)
+        corrupt_contents = b"harmless test bytes; not a SQLite database"
+        corrupt_database.write_bytes(corrupt_contents)
+        expected_message = (
+            "The local message database could not be found. Restore "
+            "instance/messages.db from your backup before using the application."
+        )
+
+        with patch.object(app_module, "DATABASE_PATH", corrupt_database):
+            app_module.app.config["TESTING"] = True
+            client = app_module.app.test_client()
+
+            home = client.get("/")
+            blocked_search = client.get("/search")
+            redirected_search = client.get("/search", follow_redirects=True)
+
+        self.assertEqual(home.status_code, 200)
+        self.assertEqual(blocked_search.status_code, 302)
+        self.assertTrue(blocked_search.headers["Location"].endswith("/"))
+        self.assertEqual(redirected_search.status_code, 200)
+        for response in (home, redirected_search):
+            html = response.get_data(as_text=True)
+            self.assertEqual(html.count(expected_message), 1)
+            self.assertEqual(html.count("Database unavailable."), 1)
+        self.assertEqual(corrupt_database.read_bytes(), corrupt_contents)
+
+    def test_readonly_database_connection_allows_queries_and_rejects_writes(self):
+        database = self.root / "readonly-instance" / "messages.db"
+        database.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(database)) as writable_connection:
+            writable_connection.execute(
+                "CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            writable_connection.execute(
+                "INSERT INTO sample (value) VALUES (?)",
+                ("local test value",),
+            )
+            writable_connection.commit()
+
+        with connect_readonly(database) as readonly_connection:
+            row = readonly_connection.execute(
+                "SELECT value FROM sample WHERE id = 1"
+            ).fetchone()
+            self.assertEqual(row["value"], "local test value")
+            with self.assertRaises(sqlite3.OperationalError):
+                readonly_connection.execute(
+                    "INSERT INTO sample (value) VALUES (?)",
+                    ("must not be written",),
+                )
+
+        with closing(sqlite3.connect(database)) as verification_connection:
+            stored_count = verification_connection.execute(
+                "SELECT COUNT(*) FROM sample"
+            ).fetchone()[0]
+        self.assertEqual(stored_count, 1)
 
     def test_normal_start_disables_debug_and_reloader(self):
         import app as app_module
@@ -282,21 +585,18 @@ class MessageAnalyzerTests(unittest.TestCase):
             )
             + "</body></html>"
         )
-        (data / "message_1.html").write_text(html, encoding="utf-8")
-        database = self.root / "missing-photo-instance" / "messages.db"
+        html_path = data / "message_1.html"
+        html_path.write_text(html, encoding="utf-8")
 
-        stats = import_messages(data, database, allowed_senders={"A"})
+        parsed = list(parse_message_file(html_path, data))
 
-        self.assertEqual(stats["messages_imported"], 2)
-        self.assertEqual(stats["duplicates_skipped"], 0)
-        self.assertEqual(stats["photo_references_matched"], 0)
-        self.assertEqual(stats["photo_references_unavailable"], 2)
-        with connect(database) as connection:
-            stored = connection.execute(
-                "SELECT attachment_path FROM messages"
-            ).fetchall()
-        self.assertEqual(len(stored), 2)
-        self.assertTrue(all(row["attachment_path"] is None for row in stored))
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(
+            [item.message_type for item in parsed],
+            ["photo", "photo"],
+        )
+        self.assertTrue(all(item.attachment_path is None for item in parsed))
+        self.assertEqual(len({item.deduplication_key for item in parsed}), 2)
 
     def test_missing_local_gif_keeps_gif_type_without_storing_unsafe_path(self):
         data = self.root / "missing-gif-case"
@@ -311,19 +611,14 @@ class MessageAnalyzerTests(unittest.TestCase):
             )
             + "</body></html>"
         )
-        (data / "message_1.html").write_text(html, encoding="utf-8")
-        database = self.root / "missing-gif-instance" / "messages.db"
+        html_path = data / "message_1.html"
+        html_path.write_text(html, encoding="utf-8")
 
-        stats = import_messages(data, database, allowed_senders={"A"})
+        parsed = list(parse_message_file(html_path, data))
 
-        self.assertEqual(stats["messages_imported"], 1)
-        self.assertEqual(stats["photo_references_unavailable"], 0)
-        with connect(database) as connection:
-            row = connection.execute(
-                "SELECT message_type, attachment_path FROM messages"
-            ).fetchone()
-        self.assertEqual(row["message_type"], "gif")
-        self.assertIsNone(row["attachment_path"])
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].message_type, "gif")
+        self.assertIsNone(parsed[0].attachment_path)
 
     def test_distinct_audio_and_video_media_keep_separate_deduplication_keys(self):
         data = self.root / "media-dedup-case"
@@ -357,26 +652,18 @@ class MessageAnalyzerTests(unittest.TestCase):
             )
             + "</body></html>"
         )
-        (data / "message_1.html").write_text(html, encoding="utf-8")
-        database = self.root / "media-dedup-instance" / "messages.db"
+        html_path = data / "message_1.html"
+        html_path.write_text(html, encoding="utf-8")
 
-        stats = import_messages(data, database, allowed_senders={"A"})
+        parsed = list(parse_message_file(html_path, data))
 
-        self.assertEqual(stats["messages_imported"], 4)
-        self.assertEqual(stats["duplicates_skipped"], 0)
-        with connect(database) as connection:
-            rows = connection.execute(
-                """
-                SELECT message_type, attachment_path
-                FROM messages
-                ORDER BY id
-                """
-            ).fetchall()
+        self.assertEqual(len(parsed), 4)
         self.assertEqual(
-            [row["message_type"] for row in rows],
+            [item.message_type for item in parsed],
             ["audio", "audio", "video", "video"],
         )
-        self.assertTrue(all(row["attachment_path"] is None for row in rows))
+        self.assertTrue(all(item.attachment_path is None for item in parsed))
+        self.assertEqual(len({item.deduplication_key for item in parsed}), 4)
 
     def test_reaction_media_is_ignored_consistently_by_both_parsers(self):
         import parser as parser_module
@@ -453,17 +740,19 @@ class MessageAnalyzerTests(unittest.TestCase):
             )
             + "</body></html>"
         )
-        (data / "message_1.html").write_text(html, encoding="utf-8")
+        html_path = data / "message_1.html"
+        html_path.write_text(html, encoding="utf-8")
         database = self.root / "photo-instance" / "messages.db"
 
-        stats = import_messages(data, database, allowed_senders={"A"})
-        self.assertEqual(stats["files_found"], 1)
-        self.assertEqual(stats["messages_imported"], 2)
-        self.assertEqual(stats["photo_files_indexed"], 1)
-        self.assertEqual(stats["photo_references_matched"], 1)
-        self.assertEqual(stats["photo_references_unavailable"], 1)
+        parsed = list(parse_message_file(html_path, data))
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0].message_type, "photo")
+        self.assertEqual(parsed[0].attachment_path, valid_name)
+        self.assertEqual(parsed[1].message_type, "photo")
+        self.assertIsNone(parsed[1].attachment_path)
 
-        with connect(database) as connection:
+        seed_database(database, [parsed_row(item) for item in parsed])
+        with connect_readonly(database) as connection:
             rows = connection.execute(
                 """
                 SELECT message_type, attachment_path
@@ -524,25 +813,26 @@ class MessageAnalyzerTests(unittest.TestCase):
         data = self.root / "pagination-photo-case"
         photos = data / "photos"
         photos.mkdir(parents=True)
-        messages = []
+        day_start = date_to_unix("2024-01-02")
+        self.assertIsNotNone(day_start)
+        fixture_rows = []
         for minute in range(51):
             filename = f"page-{minute:02d}.jpg"
             (photos / filename).write_bytes(b"\xff\xd8\xff\xe0page-photo")
-            messages.append(
-                message(
-                    "A",
-                    "",
-                    f"Jan 02, 2024, 9:{minute:02d} am",
-                    f'<img src="export/chat/photos/{filename}">',
-                )
+            fixture_rows.append(
+                {
+                    "sender": "A",
+                    "timestamp_unix": day_start + (9 * 60 + minute) * 60,
+                    "original_timestamp": (
+                        f"Jan 02, 2024, 9:{minute:02d} am"
+                    ),
+                    "message_text": "[Photo]",
+                    "message_type": "photo",
+                    "attachment_path": filename,
+                }
             )
-        (data / "message_1.html").write_text(
-            "<html><body>" + "".join(messages) + "</body></html>",
-            encoding="utf-8",
-        )
         database = self.root / "pagination-photo-instance" / "messages.db"
-        stats = import_messages(data, database, allowed_senders={"A"})
-        self.assertEqual(stats["messages_imported"], 51)
+        seed_database(database, fixture_rows)
 
         with (
             patch.object(app_module, "DATA_DIR", data),

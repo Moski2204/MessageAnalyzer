@@ -1,4 +1,4 @@
-"""Parse Instagram's HTML message export without rendering imported HTML."""
+"""Parse Instagram's HTML message export without rendering exported HTML."""
 
 from __future__ import annotations
 
@@ -688,6 +688,6 @@ def parse_message_file(
     try:
         yield from _parse_message_file_lxml(html_path, data_dir, photo_index)
     except (etree.LxmlError, OSError, ValueError):
-        # A malformed file is retried in full. Import-level deduplication makes
-        # a rare partial streaming retry safe.
+        # A malformed file is retried in full. Stable deduplication keys make a
+        # rare partial streaming retry safe for callers.
         yield from _parse_message_file_bs4(html_path, data_dir, photo_index)
